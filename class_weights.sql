@@ -1,0 +1,70 @@
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS class_weights (
+    code   INT PRIMARY KEY,
+    weight DOUBLE PRECISION
+);
+
+INSERT INTO class_weights (code, weight) VALUES (10000, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10100, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10200, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10300, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10310, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10400, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10410, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10500, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10510, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10600, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10700, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10710, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10720, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10730, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10740, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10750, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10760, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10770, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10780, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10790, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10800, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10820, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (10830, 1.2) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12000, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12100, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12200, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12300, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12400, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12410, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12420, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12430, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12500, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12600, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12610, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (12700, 1.3) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (13000, 2.0) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (13100, 2.0) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (13200, 2.0) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (13300, 2.0) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (13400, 2.0) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14000, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14010, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14020, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14030, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14040, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14050, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14060, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14070, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14080, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14090, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14100, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14110, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14120, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14130, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14140, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14160, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14170, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14180, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14190, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14200, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+INSERT INTO class_weights (code, weight) VALUES (14210, 0.9) ON CONFLICT (code) DO UPDATE SET weight = EXCLUDED.weight;
+
+COMMIT;
