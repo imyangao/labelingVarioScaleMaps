@@ -307,9 +307,14 @@ def generate_skeleton_for_gpkg(
         layer_simplified_polys = []
         layer_roads_skeleton = []
         layer_roads_mainskel = []
+
         layer_buildings_centers = []
 
         layer_roads_labels = []
+
+        layer_water_skeleton = []
+        layer_water_mainskel = []
+        layer_water_labels = []
 
         for idx, row in gdf.iterrows():
             try:
@@ -320,53 +325,133 @@ def generate_skeleton_for_gpkg(
                 if feature_class is None:
                     continue
 
-                # Process Roads (10000 <= feature_class < 11000)
                 if 10000 <= feature_class < 11000:
+                    # Optional polygon simplification
                     if do_simplify and simplify_tolerance > 0:
                         poly_for_skel = polygon.simplify(simplify_tolerance, preserve_topology=True)
                         layer_simplified_polys.append({"geometry": poly_for_skel, "poly_id": idx})
                     else:
                         poly_for_skel = polygon
 
+                    # Build raw skeleton
                     raw_skel_lines = build_skeleton_lines(poly_for_skel)
                     if not raw_skel_lines:
                         continue
 
+                    # Store the raw skeleton lines if you want them in output
                     for ln in raw_skel_lines:
                         layer_roads_skeleton.append({"geometry": ln, "poly_id": idx})
 
+                    # Convert to graph -> find junctions -> connect them
                     G = lines_to_graph(raw_skel_lines)
                     junctions = get_junction_nodes(G, min_degree=3)
-                    if len(junctions) >= 2:
-                        primary_paths = find_junction_to_junction_paths(G, junctions)
-                        merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
-                        for ln in merged_primary:
-                            if ln.length > 0:
-                                layer_roads_mainskel.append({"geometry": ln, "poly_id": idx})
+                    if len(junctions) < 2:
+                        # not enough skeleton complexity
+                        continue
 
-                        # Calculate label position and angle for the longest merged line
-                        if merged_primary:
-                            longest_line = max(merged_primary, key=lambda line: line.length)
-                            midpoint = longest_line.interpolate(0.5, normalized=True)
-                            start = longest_line.coords[0]
-                            end = longest_line.coords[-1]
-                            dx = end[0] - start[0]
-                            dy = end[1] - start[1]
-                            angle_deg = math.degrees(math.atan2(dy, dx))
+                    primary_paths = find_junction_to_junction_paths(G, junctions)
+                    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
 
-                            # Adjust angle to stay within -90 to 90 degrees
-                            if angle_deg > 90:
-                                angle_deg -= 180
-                            elif angle_deg < -90:
-                                angle_deg += 180
+                    # Store merged skeleton lines
+                    for ln in merged_primary:
+                        if ln.length > 0:
+                            layer_roads_mainskel.append({"geometry": ln, "poly_id": idx})
 
-                            layer_roads_labels.append({
-                                "geometry": midpoint,
-                                "angle": angle_deg,
-                                "feature_id": row['feature_id'],
-                                "face_id": row['face_id'],
-                                "poly_id": idx
-                            })
+                    # LABELING: Take all lines above a fraction of the max length
+                    sorted_lines = sorted(merged_primary, key=lambda l: l.length, reverse=True)
+                    if len(sorted_lines) > 0:
+                        max_length = sorted_lines[0].length
+                        threshold_fraction = 0.25  # label lines >= 25% of the longest line
+                        length_threshold = threshold_fraction * max_length
+                    else:
+                        length_threshold = 0.0
+
+                    for line in sorted_lines:
+                        if line.length < length_threshold:
+                            break  # lines are sorted desc, so break as soon as below threshold
+
+                        # Compute midpoint and angle
+                        midpoint = line.interpolate(0.5, normalized=True)
+                        (x1, y1) = line.coords[0]
+                        (x2, y2) = line.coords[-1]
+                        dx = x2 - x1
+                        dy = y2 - y1
+                        angle_deg = math.degrees(math.atan2(dy, dx))
+                        # Constrain angle to -90..90
+                        if angle_deg > 90:
+                            angle_deg -= 180
+                        elif angle_deg < -90:
+                            angle_deg += 180
+
+                        layer_roads_labels.append({
+                            "geometry": midpoint,
+                            "angle": angle_deg,
+                            "feature_id": row['feature_id'],
+                            "face_id": row['face_id'],
+                            "poly_id": idx
+                        })
+
+                elif 12000 <= feature_class < 13000:
+                    # Optional polygon simplification
+                    if do_simplify and simplify_tolerance > 0:
+                        poly_for_skel = polygon.simplify(simplify_tolerance, preserve_topology=True)
+                    else:
+                        poly_for_skel = polygon
+
+                    # Build raw skeleton
+                    raw_skel_lines = build_skeleton_lines(poly_for_skel)
+                    if not raw_skel_lines:
+                        continue
+
+                    # Store raw skeleton lines if desired
+                    for ln in raw_skel_lines:
+                        layer_water_skeleton.append({"geometry": ln, "poly_id": idx})
+
+                    # Convert to graph -> find junctions -> connect them
+                    G = lines_to_graph(raw_skel_lines)
+                    junctions = get_junction_nodes(G, min_degree=3)
+                    if len(junctions) < 2:
+                        continue
+
+                    primary_paths = find_junction_to_junction_paths(G, junctions)
+                    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
+
+                    # Store merged skeleton lines
+                    for ln in merged_primary:
+                        if ln.length > 0:
+                            layer_water_mainskel.append({"geometry": ln, "poly_id": idx})
+
+                    # LABELING: multiple lines above length threshold
+                    sorted_lines = sorted(merged_primary, key=lambda l: l.length, reverse=True)
+                    if len(sorted_lines) > 0:
+                        max_length = sorted_lines[0].length
+                        threshold_fraction = 0.25
+                        length_threshold = threshold_fraction * max_length
+                    else:
+                        length_threshold = 0.0
+
+                    for line in sorted_lines:
+                        if line.length < length_threshold:
+                            break
+
+                        midpoint = line.interpolate(0.5, normalized=True)
+                        (x1, y1) = line.coords[0]
+                        (x2, y2) = line.coords[-1]
+                        dx = x2 - x1
+                        dy = y2 - y1
+                        angle_deg = math.degrees(math.atan2(dy, dx))
+                        if angle_deg > 90:
+                            angle_deg -= 180
+                        elif angle_deg < -90:
+                            angle_deg += 180
+
+                        layer_water_labels.append({
+                            "geometry": midpoint,
+                            "angle": angle_deg,
+                            "feature_id": row['feature_id'],
+                            "face_id": row['face_id'],
+                            "poly_id": idx
+                        })
 
                 # Process Buildings (13000 <= feature_class < 14000)
                 elif 13000 <= feature_class < 14000:
@@ -386,7 +471,7 @@ def generate_skeleton_for_gpkg(
                                 dx = p2[0] - p1[0]
                                 dy = p2[1] - p1[1]
                                 angle_rad = math.atan2(dy, dx)
-                                best_angle = math.degrees(angle_rad)
+                                best_angle = math.minimum_rotated_rectangledegrees(angle_rad)
                         # Adjust angle to be within -90 to 90 degrees
                         if best_angle > 90:
                             best_angle -= 180
@@ -422,6 +507,18 @@ def generate_skeleton_for_gpkg(
         if layer_roads_labels:
             road_labels_gdf = gpd.GeoDataFrame(layer_roads_labels, crs=gdf.crs)
             road_labels_gdf.to_file(output_gpkg, layer=f"{layer}_roads_labels", driver="GPKG")
+
+        if layer_water_skeleton:
+            w_skel_gdf = gpd.GeoDataFrame(layer_water_skeleton, crs=gdf.crs)
+            w_skel_gdf.to_file(output_gpkg, layer=f"{layer}_water_skeleton", driver="GPKG")
+
+        if layer_water_mainskel:
+            w_mainskel_gdf = gpd.GeoDataFrame(layer_water_mainskel, crs=gdf.crs)
+            w_mainskel_gdf.to_file(output_gpkg, layer=f"{layer}_water_mainskel", driver="GPKG")
+
+        if layer_water_labels:
+            w_labels_gdf = gpd.GeoDataFrame(layer_water_labels, crs=gdf.crs)
+            w_labels_gdf.to_file(output_gpkg, layer=f"{layer}_water_labels", driver="GPKG")
 
         # Write building centers
         if layer_buildings_centers:
