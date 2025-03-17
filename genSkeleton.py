@@ -390,6 +390,7 @@ def generate_skeleton_for_gpkg(
                             "angle": angle_deg,
                             "feature_class": row['feature_class'],
                             "face_id": row['face_id'],
+                            "name": row['name'],
                             "poly_id": idx
                         })
 
@@ -452,6 +453,7 @@ def generate_skeleton_for_gpkg(
                             "angle": angle_deg,
                             "feature_class": row['feature_class'],
                             "face_id": row['face_id'],
+                            "name": row['name'],
                             "poly_id": idx
                         })
 
@@ -487,6 +489,7 @@ def generate_skeleton_for_gpkg(
                             "angle": best_angle,
                             "feature_class": row['feature_class'],
                             "face_id": row['face_id'],
+                            "name": row['name'],
                             "poly_id": idx
                         })
 

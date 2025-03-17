@@ -24,10 +24,13 @@ def create_slice_table(conn, step_value=11500):
     SELECT
         p.polygon_geom,
         f.face_id,
-        f.feature_class
+        f.feature_class,
+        ff.name  -- new
     FROM polygonized_edges p
     JOIN yan_tgap_face f
       ON ST_Contains(p.polygon_geom, f.pip_geometry)
+    LEFT JOIN yan_face ff            -- or use JOIN if guaranteed 1:1
+      ON ff.face_id = f.face_id      -- new
     WHERE f.step_low <= {step_value} AND f.step_high > {step_value};
     """
 
@@ -41,7 +44,8 @@ def export_slice_to_gpkg(conn, step_value=11500, out_gpkg="slice_intermediate.gp
     Reads the slice table from PostGIS into a GeoDataFrame and writes it to a .gpkg file.
     """
     slice_table_name = f"yan_topo2geom_{step_value}_enriched"
-    sql = f"SELECT face_id, feature_class, polygon_geom FROM {slice_table_name};"
+    # sql = f"SELECT face_id, feature_class, polygon_geom FROM {slice_table_name};"
+    sql = f"SELECT face_id, feature_class, name, polygon_geom FROM {slice_table_name};"
 
     # Read PostGIS table as a GeoDataFrame
     gdf = gpd.read_postgis(sql, conn, geom_col="polygon_geom")
@@ -60,18 +64,22 @@ def create_label_table_for_step(conn, step_value=11500):
     plus step_value, face_id, feature_class, geometry(POINT) for anchors, and angle.
     """
     table_name = f"label_points_{step_value}"
+    drop_sql = f"DROP TABLE IF EXISTS {table_name} CASCADE;"
     create_sql = f"""
-    CREATE TABLE IF NOT EXISTS {table_name} (
-        label_id   SERIAL PRIMARY KEY,
-        step_value INTEGER,
-        face_id    INTEGER,
-        feature_class INTEGER,
-        anchor_geom geometry(POINT, 28992),
-        angle      DOUBLE PRECISION
-    );
-    """
+            CREATE TABLE {table_name} (
+                label_id SERIAL PRIMARY KEY,
+                step_value INTEGER,
+                face_id INTEGER,
+                feature_class INTEGER,
+                name TEXT,
+                anchor_geom geometry(POINT, 28992),
+                angle DOUBLE PRECISION
+            );
+        """
+
     with conn.cursor() as cur:
-        cur.execute(create_sql)
+        cur.execute(drop_sql)  # drop the old table if it exists
+        cur.execute(create_sql)  # create the new one
     conn.commit()
 
 
@@ -96,8 +104,9 @@ def store_labels_from_gpkg(conn, step_value, gpkg_file):
     # Prepare an INSERT statement
     # We'll just do a straightforward INSERT (we allow multiple anchors for the same face).
     insert_sql = f"""
-    INSERT INTO {table_name} (step_value, face_id, feature_class, anchor_geom, angle)
-    VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 28992), %s)
+    INSERT INTO {table_name} 
+    (step_value, face_id, feature_class, name, anchor_geom, angle)
+    VALUES (%s, %s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 28992), %s)
     """
 
     cur = conn.cursor()
@@ -113,13 +122,15 @@ def store_labels_from_gpkg(conn, step_value, gpkg_file):
             for idx, row in gdf.iterrows():
                 face_id = row.get("face_id")
                 fclass = row.get("feature_class")
-                angle = row.get(angle_col, 0.0)  # default 0 if missing
-                geom_wkt = row["geometry"].wkt  # convert geometry to WKT
+                name = row.get("name")  # new
+                angle = row.get(angle_col, 0.0)
+                geom_wkt = row["geometry"].wkt
 
                 cur.execute(insert_sql, (
                     step_value,
                     face_id,
                     fclass,
+                    name,
                     geom_wkt,
                     angle
                 ))
