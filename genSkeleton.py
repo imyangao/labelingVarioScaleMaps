@@ -294,7 +294,9 @@ def generate_skeleton_for_gpkg(
         # Keep only valid polygons and explode MultiPolygons
         gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
         gdf = gdf[gdf.geometry.is_valid]
-        gdf = gdf.explode(ignore_index=False).reset_index(names=['feature_id', 'face_id'])
+        # gdf = gdf.explode(ignore_index=False).reset_index(names=['feature_class', 'face_id'])
+        gdf = gdf.explode(index_parts=True)
+        gdf = gdf.reset_index(drop=True)
 
         # # debug
         # print(gdf.geometry.type.value_counts())
@@ -386,7 +388,7 @@ def generate_skeleton_for_gpkg(
                         layer_roads_labels.append({
                             "geometry": midpoint,
                             "angle": angle_deg,
-                            "feature_id": row['feature_id'],
+                            "feature_class": row['feature_class'],
                             "face_id": row['face_id'],
                             "poly_id": idx
                         })
@@ -448,7 +450,7 @@ def generate_skeleton_for_gpkg(
                         layer_water_labels.append({
                             "geometry": midpoint,
                             "angle": angle_deg,
-                            "feature_id": row['feature_id'],
+                            "feature_class": row['feature_class'],
                             "face_id": row['face_id'],
                             "poly_id": idx
                         })
@@ -483,7 +485,7 @@ def generate_skeleton_for_gpkg(
                             "geometry": center,
                             "radius": radius,
                             "angle": best_angle,
-                            "feature_id": row['feature_id'],
+                            "feature_class": row['feature_class'],
                             "face_id": row['face_id'],
                             "poly_id": idx
                         })

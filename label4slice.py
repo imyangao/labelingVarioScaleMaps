@@ -1,6 +1,6 @@
 import psycopg2
 import geopandas as gpd
-from shapely import wkb
+import fiona
 import os
 
 # Import skeleton-generation function
@@ -48,14 +48,87 @@ def export_slice_to_gpkg(conn, step_value=11500, out_gpkg="slice_intermediate.gp
 
     # Write to GeoPackage (intermediate result)
     if os.path.exists(out_gpkg):
-        os.remove(out_gpkg)  # remove if you want a fresh file each time
+        os.remove(out_gpkg)
 
     gdf.to_file(out_gpkg, layer="map_slice", driver="GPKG")
     print(f"Exported slice to {out_gpkg}, layer=map_slice")
 
 
+def create_label_table_for_step(conn, step_value=11500):
+    """
+    Creates (if not exists) a label_points_{step_value} table with a label_id SERIAL PK,
+    plus step_value, face_id, feature_class, geometry(POINT) for anchors, and angle.
+    """
+    table_name = f"label_points_{step_value}"
+    create_sql = f"""
+    CREATE TABLE IF NOT EXISTS {table_name} (
+        label_id   SERIAL PRIMARY KEY,
+        step_value INTEGER,
+        face_id    INTEGER,
+        feature_class INTEGER,
+        anchor_geom geometry(POINT, 28992),
+        angle      DOUBLE PRECISION
+    );
+    """
+    with conn.cursor() as cur:
+        cur.execute(create_sql)
+    conn.commit()
+
+
+def store_labels_from_gpkg(conn, step_value, gpkg_file):
+    """
+    Reads label layers from skeleton output .gpkg (e.g. ..._roads_labels, ..._water_labels, etc.)
+    and inserts them into label_points_{step_value} with a label_id SERIAL, plus step_value.
+    """
+    table_name = f"label_points_{step_value}"
+
+    # Check which layers exist in the GPKG
+    layers = fiona.listlayers(gpkg_file)
+
+    # Possible label layers your genSkeleton.py might create:
+    candidate_label_layers = [
+        # example layer names used in genSkeleton.py:
+        "map_slice_roads_labels",
+        "map_slice_water_labels",
+        "map_slice_buildings_centers",
+    ]
+
+    # Prepare an INSERT statement
+    # We'll just do a straightforward INSERT (we allow multiple anchors for the same face).
+    insert_sql = f"""
+    INSERT INTO {table_name} (step_value, face_id, feature_class, anchor_geom, angle)
+    VALUES (%s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 28992), %s)
+    """
+
+    cur = conn.cursor()
+
+    for lyr in candidate_label_layers:
+        if lyr in layers:
+            # Load the label layer as a GeoDataFrame
+            gdf = gpd.read_file(gpkg_file, layer=lyr)
+
+            # If your script uses a different attribute name than "angle", adapt accordingly:
+            angle_col = "angle" if "angle" in gdf.columns else "rotation"
+
+            for idx, row in gdf.iterrows():
+                face_id = row.get("face_id")
+                fclass = row.get("feature_class")
+                angle = row.get(angle_col, 0.0)  # default 0 if missing
+                geom_wkt = row["geometry"].wkt  # convert geometry to WKT
+
+                cur.execute(insert_sql, (
+                    step_value,
+                    face_id,
+                    fclass,
+                    geom_wkt,
+                    angle
+                ))
+
+    conn.commit()
+    cur.close()
+
+
 def main():
-    # 1) Connect to PostGIS
     conn = psycopg2.connect(
         dbname="tgap_test",
         user="postgres",
@@ -63,37 +136,40 @@ def main():
         host="localhost",
         port=5432
     )
-    conn.autocommit = True  # optional, you can manage transactions however you prefer
+    conn.autocommit = True
+
+    # 1) Set step value
+    step_value = 3666
 
     # 2) Create the slice table in the database
-    step_value = 3666
     create_slice_table(conn, step_value=step_value)
 
-    # 3) Export that slice to a GeoPackage as intermediate result
+    # 3) Export that slice to a GeoPackage (intermediate result)
     intermediate_gpkg = f"slice_intermediate_{step_value}.gpkg"
-    output_gpkg = f"skeleton_output_{step_value}.gpkg"
-
     export_slice_to_gpkg(conn, step_value=step_value, out_gpkg=intermediate_gpkg)
 
-    # 4) Call the skeleton-generation function from genSkeleton.py
+    # 4) Generate the skeleton-labeled output
+    output_gpkg = f"skeleton_output_{step_value}.gpkg"
     if os.path.exists(output_gpkg):
-        os.remove(output_gpkg)  # ensure a clean file if you want
+        os.remove(output_gpkg)
 
-    # generate_skeleton_for_gpkg expects:
-    #   input_gpkg,
-    #   output_gpkg,
-    #   do_simplify (bool),
-    #   simplify_tolerance (float)
     generate_skeleton_for_gpkg(
-        input_gpkg=intermediate_gpkg,  # The file we just wrote
+        input_gpkg=intermediate_gpkg,
         output_gpkg=output_gpkg,
         do_simplify=True,
         simplify_tolerance=10.0
     )
-
     print(f"Skeleton generation complete. Results in {output_gpkg}.")
 
-    # 5) Close the connection
+    # 5) Create the label table (with label_id serial, step_value, etc.)
+    create_label_table_for_step(conn, step_value=step_value)
+
+    # 6) Read label layers from the output .gpkg and store them in the new table
+    store_labels_from_gpkg(conn, step_value, output_gpkg)
+
+    print(f"Labels inserted into table label_points_{step_value}.")
+
+    # 7) Close connection
     conn.close()
 
 
