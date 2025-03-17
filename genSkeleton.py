@@ -471,7 +471,8 @@ def generate_skeleton_for_gpkg(
                                 dx = p2[0] - p1[0]
                                 dy = p2[1] - p1[1]
                                 angle_rad = math.atan2(dy, dx)
-                                best_angle = math.minimum_rotated_rectangledegrees(angle_rad)
+                                # best_angle = math.minimum_rotated_rectangledegrees(angle_rad)
+                                best_angle = math.degrees(angle_rad)
                         # Adjust angle to be within -90 to 90 degrees
                         if best_angle > 90:
                             best_angle -= 180
