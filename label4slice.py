@@ -90,10 +90,17 @@ def store_labels_from_gpkg(conn, step_value, gpkg_file):
     """
     table_name = f"label_points_{step_value}"
 
+    if not os.path.exists(gpkg_file):
+        print(f"Warning: {gpkg_file} not generated (no valid features).")
+        return
+
     # Check which layers exist in the GPKG
     layers = fiona.listlayers(gpkg_file)
 
-    # Possible label layers your genSkeleton.py might create:
+    if not layers:
+        print(f"Warning: {gpkg_file} has no valid label layers.")
+        return
+
     candidate_label_layers = [
         # example layer names used in genSkeleton.py:
         "map_slice_roads_labels",
@@ -101,8 +108,6 @@ def store_labels_from_gpkg(conn, step_value, gpkg_file):
         "map_slice_buildings_centers",
     ]
 
-    # Prepare an INSERT statement
-    # We'll just do a straightforward INSERT (we allow multiple anchors for the same face).
     insert_sql = f"""
     INSERT INTO {table_name} 
     (step_value, face_id, feature_class, name, anchor_geom, angle)
@@ -150,7 +155,7 @@ def main():
     conn.autocommit = True
 
     # 1) Set step value
-    step_value = 3666
+    step_value = 11355
 
     # 2) Create the slice table in the database
     create_slice_table(conn, step_value=step_value)
@@ -170,19 +175,29 @@ def main():
         do_simplify=True,
         simplify_tolerance=10.0
     )
-    print(f"Skeleton generation complete. Results in {output_gpkg}.")
+    # print(f"Skeleton generation complete. Results in {output_gpkg}.")
+    #
+    # # 5) Create the label table (with label_id serial, step_value, etc.)
+    # create_label_table_for_step(conn, step_value=step_value)
+    #
+    # # 6) Read label layers from the output .gpkg and store them in the new table
+    # store_labels_from_gpkg(conn, step_value, output_gpkg)
+    #
+    # print(f"Labels inserted into table label_points_{step_value}.")
+    #
+    # # 7) Close connection
+    # conn.close()
 
-    # 5) Create the label table (with label_id serial, step_value, etc.)
-    create_label_table_for_step(conn, step_value=step_value)
+    if os.path.exists(output_gpkg):
+        print(f"Skeleton generation complete. Results in {output_gpkg}.")
 
-    # 6) Read label layers from the output .gpkg and store them in the new table
-    store_labels_from_gpkg(conn, step_value, output_gpkg)
-
-    print(f"Labels inserted into table label_points_{step_value}.")
-
-    # 7) Close connection
-    conn.close()
-
+        # Step 5 & 6: Create label table and store labels
+        create_label_table_for_step(conn, step_value=step_value)
+        store_labels_from_gpkg(conn, step_value, output_gpkg)
+        print(f"Labels inserted into table label_points_{step_value}.")
+        conn.close()
+    else:
+        print("No skeleton generated. Skipping label insertion.")
 
 if __name__ == "__main__":
     main()
