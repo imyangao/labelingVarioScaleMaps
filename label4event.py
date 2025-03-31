@@ -5,6 +5,10 @@ from shapely.algorithms.polylabel import polylabel
 import math
 import geopandas as gpd
 import os
+from shapely.geometry import Polygon
+from shapely.affinity import rotate
+from scalestep import ScaleStep
+from PIL import ImageFont, ImageDraw, Image
 
 from genSkeleton import (
     build_skeleton_lines,
@@ -254,7 +258,7 @@ def compute_building_anchor(polygon):
 ##############################################################################
 # Main pipeline
 ##############################################################################
-def main(do_simplify=False, simplify_tolerance=1.0):
+def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
@@ -263,6 +267,11 @@ def main(do_simplify=False, simplify_tolerance=1.0):
         port=DB_PORT
     )
     conn.autocommit = True
+
+    # Initialize ScaleStep
+    base_scale = 10000
+    dataset_name = 'yan'
+    scale_step = ScaleStep(base_scale, dataset_name)
 
     # 1) Create label_anchors table
     with conn.cursor() as cur:
@@ -275,13 +284,17 @@ def main(do_simplify=False, simplify_tolerance=1.0):
             feature_class INTEGER,
             name TEXT,
             anchor_geom geometry(POINT, 28992),
-            angle      DOUBLE PRECISION
+            angle      DOUBLE PRECISION,
+            fits       BOOLEAN  -- Added column
         );
         """)
 
     # 2) Get faces
     faces = get_faces_of_interest(conn)
     print(f"Found {len(faces)} faces of interest.")
+
+    font_path = "C:/Users/17731/Downloads/Roboto/static/Roboto_Condensed-Light.ttf"
+    font = ImageFont.truetype(font_path, font_size)
 
     # Each row: (face_id, step_low, step_high, feature_class, name)
     for (face_id, f_low, f_high, fclass, face_name) in faces:
@@ -350,19 +363,61 @@ def main(do_simplify=False, simplify_tolerance=1.0):
             # Insert anchors
             for (anchor_pt, angle) in anchors:
                 wkt = anchor_pt.wkt
+                label_text = face_name or ""
+                if not label_text.strip():
+                    fits = False
+                else:
+                    # Calculate scale and resolution
+                    scale_denominator = scale_step.scale_for_step(S)
+                    resolution_mpp = ScaleStep.resolution_mpp(scale_denominator, ppi=96)
+
+                    # Calculate label dimensions in meters
+                    # num_chars = len(label_text)
+                    # label_width_px = num_chars * 10  # Approx. 10px per character
+                    # label_height_px = font_size
+                    bbox = font.getbbox(label_text)
+                    width_px = bbox[2] - bbox[0]
+                    height_px = bbox[3] - bbox[1]
+                    label_width_m = width_px * resolution_mpp
+                    label_height_m = height_px * resolution_mpp
+
+                    # Create and rotate rectangle
+                    half_w = label_width_m / 2
+                    half_h = label_height_m / 2
+                    x, y = anchor_pt.x, anchor_pt.y
+                    rect = Polygon([
+                        (x - half_w, y - half_h),
+                        (x + half_w, y - half_h),
+                        (x + half_w, y + half_h),
+                        (x - half_w, y + half_h)
+                    ])
+                    rotated_rect = rotate(rect, angle, origin=anchor_pt)
+
+                    # Check containment
+                    fits = rotated_rect.within(poly_shp) if poly_shp else False
+
+                # Insert into database
                 with conn.cursor() as cur:
                     cur.execute("""
-                    INSERT INTO label_anchors(
-                        face_id,
-                        step_value,
-                        feature_class,
-                        name,
-                        anchor_geom,
-                        angle
-                    )
-                    VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 28992), %s)
-                    """,
-                    (face_id, S, fclass, face_name, wkt, angle))
+                        INSERT INTO label_anchors(face_id, step_value, feature_class, name, anchor_geom, angle, fits)
+                        VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 28992), %s, %s)
+                    """, (face_id, S, fclass, face_name, wkt, angle, fits))
+
+    # with conn.cursor() as cur:
+    #     cur.execute("""
+    #         WITH first_failure AS (
+    #             SELECT face_id, name, MIN(step_value) AS first_fail_step
+    #             FROM label_anchors
+    #             WHERE fits = False
+    #             GROUP BY face_id, name
+    #         )
+    #         UPDATE label_anchors la
+    #         SET fits = False
+    #         FROM first_failure ff
+    #         WHERE la.face_id = ff.face_id
+    #         AND la.name = ff.name
+    #         AND la.step_value >= ff.first_fail_step;
+    #     """)
 
     conn.close()
     print("Done! Label anchors inserted.")
@@ -375,5 +430,5 @@ if __name__ == "__main__":
     #   2) with simplification
     #       main(do_simplify=True, simplify_tolerance=5.0)
 
-    main(do_simplify=True, simplify_tolerance=10.0)
+    main(do_simplify=True, simplify_tolerance=10.0, font_size=10)
 
