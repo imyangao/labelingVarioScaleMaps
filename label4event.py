@@ -284,6 +284,7 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
             feature_class INTEGER,
             name TEXT,
             anchor_geom geometry(POINT, 28992),
+            face_geom    geometry(MULTIPOLYGON, 28992),
             angle      DOUBLE PRECISION,
             fits       BOOLEAN  -- Added column
         );
@@ -334,6 +335,7 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
             poly_shp = polygonize_in_postgis_and_get_polygon(conn, boundary_wkbs)
             if not poly_shp or poly_shp.is_empty:
                 continue
+            poly_wkt = poly_shp.wkt
 
             # Decide how to compute anchors
             if (ROAD_MIN <= fclass < ROAD_MAX) or (WATER_MIN <= fclass < WATER_MAX):
@@ -399,9 +401,9 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
                 # Insert into database
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO label_anchors(face_id, step_value, feature_class, name, anchor_geom, angle, fits)
-                        VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 28992), %s, %s)
-                    """, (face_id, S, fclass, face_name, wkt, angle, fits))
+                        INSERT INTO label_anchors(face_id, step_value, feature_class, name, anchor_geom, face_geom, angle, fits)
+                        VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 28992), ST_Multi(ST_GeomFromText(%s, 28992)), %s, %s)
+                    """, (face_id, S, fclass, face_name, wkt, poly_wkt, angle, fits))
 
     # with conn.cursor() as cur:
     #     cur.execute("""
