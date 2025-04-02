@@ -255,6 +255,136 @@ def compute_building_anchor(polygon):
 
     return anchor, best_angle
 
+
+##############################################################################
+# Assign label_trace_id
+##############################################################################
+def assign_label_trace_ids(conn, distance_threshold=50.0):
+    """
+    Post-process the label_anchors table to group anchors from the same face
+    that persist across different steps into the same label_trace_id.
+
+    distance_threshold is how close two anchors must be (in map units)
+    to be considered the 'same' anchor in consecutive steps.
+    """
+    from scipy.optimize import linear_sum_assignment
+    import math
+    from collections import defaultdict
+
+    # 1) Add new column if it doesn’t exist
+    with conn.cursor() as cur:
+        try:
+            cur.execute("ALTER TABLE label_anchors ADD COLUMN label_trace_id BIGSERIAL;")
+            # If you want them uninitialized (NULL) initially, you can do so;
+            # or use a separate bigserial table. For demonstration, we’ll just
+            # create the column and set it below.
+        except psycopg2.errors.DuplicateColumn:
+            # If it already exists, ignore
+            conn.rollback()
+
+    # 2) Fetch all anchors
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT label_id, face_id, step_value,
+                   ST_X(anchor_geom) AS x,
+                   ST_Y(anchor_geom) AS y
+            FROM label_anchors
+            ORDER BY face_id, step_value;
+        """)
+        rows = cur.fetchall()
+
+    # Group by face_id
+    faces_map = defaultdict(list)
+    # Each entry: (label_id, step_value, x, y)
+    # Only match anchors within the same face to each other
+    for (lbl_id, face_id, step_val, x, y) in rows:
+        faces_map[face_id].append((lbl_id, step_val, x, y))
+
+    # We'll store label_id -> label_trace_id
+    assignments = {}
+
+    # a global trace counter,
+    next_trace_id = 1
+
+    for face_id, anchors in faces_map.items():
+        # Sort by ascending step_value
+        anchors.sort(key=lambda r: r[1])
+
+        # Split by step_value
+        from itertools import groupby
+        steps_data = [(step_val, list(grp))
+                      for step_val, grp in groupby(anchors, key=lambda r: r[1])]
+
+        # This will hold (trace_id, x, y) for anchors from the *previous* step
+        active_traces = []
+
+        for idx, (step_val, anchor_list) in enumerate(steps_data):
+            if idx == 0:
+                # All anchors in the first step get new trace IDs
+                for (lbl_id, stv, x, y) in anchor_list:
+                    assignments[lbl_id] = next_trace_id
+                    active_traces.append((next_trace_id, x, y))
+                    next_trace_id += 1
+            else:
+                # Match anchor_list to active_traces from the previous step
+                # Construct cost matrix for Hungarian method
+                import math
+
+                cost_matrix = []
+                for (t_id, ax, ay) in active_traces:
+                    row = []
+                    for (lbl_id, stv, x, y) in anchor_list:
+                        dist = math.hypot(x - ax, y - ay)
+                        row.append(dist)
+                    cost_matrix.append(row)
+
+                if cost_matrix:
+                    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+                else:
+                    row_ind, col_ind = [], []
+
+                # Track which anchors are matched
+                matched_anchors = set()
+                matched_rows = set()
+
+                new_active = []
+
+                # For each matched pair, if the distance is below threshold,
+                # treat them as the same trace.
+                for r_i, c_i in zip(row_ind, col_ind):
+                    dist = cost_matrix[r_i][c_i]
+                    if dist <= distance_threshold:
+                        trace_id, ax, ay = active_traces[r_i]
+                        lbl_id, stv, x, y = anchor_list[c_i]
+                        assignments[lbl_id] = trace_id
+                        matched_rows.add(r_i)
+                        matched_anchors.add(c_i)
+                        # Track the new location for that trace
+                        new_active.append((trace_id, x, y))
+
+                # Now, any anchor in this step that was not matched must be new
+                for c_i, (lbl_id, stv, x, y) in enumerate(anchor_list):
+                    if c_i not in matched_anchors:
+                        assignments[lbl_id] = next_trace_id
+                        new_active.append((next_trace_id, x, y))
+                        next_trace_id += 1
+
+                # active_traces for the next iteration
+                active_traces = new_active
+
+    # 3) Update the database
+    with conn.cursor() as cur:
+        for lbl_id, trace_id in assignments.items():
+            cur.execute("""
+                UPDATE label_anchors
+                   SET label_trace_id = %s
+                 WHERE label_id = %s;
+            """, (trace_id, lbl_id))
+
+    conn.commit()
+    print("label_trace_id assigned to all anchors.")
+
+
 ##############################################################################
 # Main pipeline
 ##############################################################################
@@ -421,6 +551,9 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
     #         AND la.step_value >= ff.first_fail_step;
     #     """)
 
+    # Done inserting; now assign label_trace_id
+    assign_label_trace_ids(conn, distance_threshold=50.0)
+
     conn.close()
     print("Done! Label anchors inserted.")
 
@@ -432,5 +565,5 @@ if __name__ == "__main__":
     #   2) with simplification
     #       main(do_simplify=True, simplify_tolerance=5.0)
 
-    main(do_simplify=True, simplify_tolerance=10.0, font_size=10)
+    main(do_simplify=True, simplify_tolerance=5.0, font_size=10)
 
