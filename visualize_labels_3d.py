@@ -3,6 +3,7 @@ import plotly.graph_objects as go
 from shapely.geometry import Point, Polygon
 import numpy as np
 from sqlalchemy import create_engine
+import pandas as pd
 
 def connect_to_db():
     """Connect to the PostgreSQL database using SQLAlchemy."""
@@ -63,10 +64,129 @@ def get_faces_and_labels():
     """
     
     labels_df = gpd.read_postgis(labels_sql, engine, geom_col='anchor_geom')
-    
-    return faces_df, labels_df
 
-def create_3d_visualization(faces_df, labels_df):
+    bounds_sql = """
+    SELECT
+        label_trace_id,
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        min_step,
+        max_step
+    FROM label_trace_3d_bounds;
+    """
+
+    bounds_df = pd.read_sql(bounds_sql, engine)
+    
+    return faces_df, labels_df, bounds_df
+
+
+def add_bounding_box_trace(fig, min_x, max_x, min_y, max_y, min_step, max_step, name='Bounding Box'):
+    """
+    Adds a 3D wireframe bounding box to the figure.
+    """
+    # Corner points of the box
+    corners = [
+        (min_x, min_y, min_step),
+        (min_x, min_y, max_step),
+        (min_x, max_y, min_step),
+        (min_x, max_y, max_step),
+        (max_x, min_y, min_step),
+        (max_x, min_y, max_step),
+        (max_x, max_y, min_step),
+        (max_x, max_y, max_step),
+    ]
+
+    # Edges: each tuple is a pair of corner indices
+    edges = [
+        (0, 1), (0, 2), (1, 3), (2, 3),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+        (4, 5), (4, 6), (5, 7), (6, 7),
+    ]
+
+    # Add each edge as a small "line"
+    for i, j in edges:
+        x_coords = [corners[i][0], corners[j][0]]
+        y_coords = [corners[i][1], corners[j][1]]
+        z_coords = [corners[i][2], corners[j][2]]
+
+        fig.add_trace(go.Scatter3d(
+            x=x_coords,
+            y=y_coords,
+            z=z_coords,
+            mode='lines',
+            line=dict(
+                color='magenta',  # choose any color
+                width=2
+            ),
+            name=name,
+            showlegend=False  # set True if you want a legend entry for each edge
+        ))
+
+
+def add_solid_bounding_box_trace(
+        fig,
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        min_step,
+        max_step,
+        name='Bounding Box',
+        color='magenta'
+):
+    """
+    Adds a 3D solid bounding box (cuboid) as a Mesh3d with partial transparency.
+    """
+    import numpy as np
+    import plotly.graph_objects as go
+
+    # Define the 8 corner points
+    corners = np.array([
+        [min_x, min_y, min_step],
+        [min_x, min_y, max_step],
+        [min_x, max_y, min_step],
+        [min_x, max_y, max_step],
+        [max_x, min_y, min_step],
+        [max_x, min_y, max_step],
+        [max_x, max_y, min_step],
+        [max_x, max_y, max_step]
+    ])
+
+    x = corners[:, 0]
+    y = corners[:, 1]
+    z = corners[:, 2]
+
+    # The faces of a cuboid can be defined by two triangles each.
+    # One simple approach: define the 12 triangles (i, j, k)
+    # that form the 6 rectangular faces.
+    # For example, the first face is formed by corners 0,1,2,3, etc.
+    # For your convenience, here’s a standard indexing for the cuboid:
+    I = [0, 0, 0, 1, 2, 4, 7, 3, 5, 6, 6, 2]
+    J = [2, 3, 1, 2, 4, 7, 6, 5, 7, 2, 3, 6]
+    K = [3, 1, 2, 4, 7, 6, 5, 7, 3, 6, 6, 3]
+
+    fig.add_trace(go.Mesh3d(
+        x=x,
+        y=y,
+        z=z,
+        i=I,
+        j=J,
+        k=K,
+        color=color,  # e.g. 'rgba(255,0,255,1)' for fully opaque
+        opacity=0.2,  # 0.2 means 20% opaque / 80% transparent
+        name=name,
+        hovertemplate=(
+            f"{name}<br>"
+            f"x-range: [{min_x}, {max_x}]<br>"
+            f"y-range: [{min_y}, {max_y}]<br>"
+            f"step-range: [{min_step}, {max_step}]<extra></extra>"
+        )
+    ))
+
+
+def create_3d_visualization(faces_df, labels_df, bounds_df):
     """Create a 3D visualization of faces and labels rendering."""
     fig = go.Figure()
     
@@ -273,7 +393,26 @@ def create_3d_visualization(faces_df, labels_df):
             text=[f"Step: {step}" for step in z_vals],
             showlegend=False  # You can enable this if desired
         ))
-    
+
+        # 1) Identify all relevant trace IDs
+        relevant_trace_ids = set(key[0] for key in label_traces.groups.keys())
+
+        # 2) Filter `bounds_df` to only those
+        filtered_bounds = bounds_df[bounds_df['label_trace_id'].isin(relevant_trace_ids)]
+
+        # 3) Add bounding boxes only for those traces
+        for idx, row in filtered_bounds.iterrows():
+            add_bounding_box_trace(
+            # add_solid_bounding_box_trace(
+                fig,
+                row['min_x'],
+                row['max_x'],
+                row['min_y'],
+                row['max_y'],
+                row['min_step'],
+                row['max_step'],
+                name=f"Trace Bounds {row['label_trace_id']}"
+            )
 
     fig.update_layout(
         title='3D Visualization of Faces and Labels',
@@ -314,10 +453,10 @@ def create_3d_visualization(faces_df, labels_df):
 
 def main():
     print("Loading data from database...")
-    faces_df, labels_df = get_faces_and_labels()
+    faces_df, labels_df, bounds_df = get_faces_and_labels()
     
     print("Creating 3D visualization...")
-    create_3d_visualization(faces_df, labels_df)
+    create_3d_visualization(faces_df, labels_df, bounds_df)
     
     print("Done!")
 
