@@ -9,6 +9,9 @@ from shapely.geometry import Polygon
 from shapely.affinity import rotate
 from scalestep import ScaleStep
 from PIL import ImageFont, ImageDraw, Image
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from collections import defaultdict
 
 from genSkeleton import (
     build_skeleton_lines,
@@ -386,6 +389,125 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
 
 
 ##############################################################################
+# Compute 3D bounding boxes
+##############################################################################
+def compute_3d_bounding_boxes(conn, create_table=True):
+    """
+    For each label_trace_id, compute an axis-aligned bounding box in x, y,
+    and step_value space. Then optionally store them in a new table for
+    further use or visualization.
+    """
+    if create_table:
+        with conn.cursor() as cur:
+            # Drop if exists for demonstration; remove in real environment
+            cur.execute("DROP TABLE IF EXISTS label_trace_3d_bounds;")
+            # We will store minX, maxX, minY, maxY, minStep, maxStep
+            cur.execute("""
+                CREATE TABLE label_trace_3d_bounds (
+                    label_trace_id BIGINT,
+                    min_x DOUBLE PRECISION,
+                    max_x DOUBLE PRECISION,
+                    min_y DOUBLE PRECISION,
+                    max_y DOUBLE PRECISION,
+                    min_step INTEGER,
+                    max_step INTEGER
+                );
+            """)
+        conn.commit()
+
+    # Fetch anchors grouped by label_trace_id
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT label_trace_id,
+                   ST_X(anchor_geom) as x,
+                   ST_Y(anchor_geom) as y,
+                   step_value
+            FROM label_anchors
+            WHERE label_trace_id IS NOT NULL
+            ORDER BY label_trace_id;
+        """)
+        rows = cur.fetchall()
+
+    # Dictionary: trace_id -> list of (x, y, step)
+    trace_map = defaultdict(list)
+    for t_id, x, y, stp in rows:
+        trace_map[t_id].append((x, y, stp))
+
+    # Compute bounding boxes
+    bounding_boxes = {}
+    for t_id, coords in trace_map.items():
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        steps = [c[2] for c in coords]
+        min_x = min(xs)
+        max_x = max(xs)
+        min_y = min(ys)
+        max_y = max(ys)
+        min_stp = min(steps)
+        max_stp = max(steps)
+        bounding_boxes[t_id] = (min_x, max_x, min_y, max_y, min_stp, max_stp)
+
+    # Insert bounding boxes into table
+    if create_table:
+        with conn.cursor() as cur:
+            for t_id, (mnx, mxx, mny, mxy, mns, mxs) in bounding_boxes.items():
+                cur.execute("""
+                    INSERT INTO label_trace_3d_bounds (
+                        label_trace_id,
+                        min_x, max_x, min_y, max_y,
+                        min_step, max_step
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s);
+                """, (t_id, mnx, mxx, mny, mxy, mns, mxs))
+        conn.commit()
+
+    # print("3D bounding boxes have been computed.")
+    return bounding_boxes
+
+
+##############################################################################
+# Simple 3D visualization for bounding boxes
+##############################################################################
+def visualize_3d_bounding_boxes(bounding_boxes):
+    """
+    Create a very simple 3D plot of each axis-aligned bounding box using Matplotlib.
+    """
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Step')
+
+    for t_id, (min_x, max_x, min_y, max_y, min_step, max_step) in bounding_boxes.items():
+        # "Corners" of the 3D box
+        corners = [
+            (min_x, min_y, min_step),
+            (min_x, min_y, max_step),
+            (min_x, max_y, min_step),
+            (min_x, max_y, max_step),
+            (max_x, min_y, min_step),
+            (max_x, min_y, max_step),
+            (max_x, max_y, min_step),
+            (max_x, max_y, max_step),
+        ]
+        # We'll draw line segments between these corners
+        # For an axis-aligned box, we have 12 edges:
+        edges = [
+            (0,1), (0,2), (0,4), (7,3), (7,5), (7,6), (1,3), (1,5), (2,3), (2,6), (4,5), (4,6)
+        ]
+        for (i, j) in edges:
+            p1 = corners[i]
+            p2 = corners[j]
+            xs = [p1[0], p2[0]]
+            ys = [p1[1], p2[1]]
+            zs = [p1[2], p2[2]]
+            ax.plot(xs, ys, zs)
+
+    plt.title("3D Bounding Boxes by label_trace_id")
+    plt.show()
+
+
+##############################################################################
 # Main pipeline
 ##############################################################################
 def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
@@ -551,11 +673,21 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
     #         AND la.step_value >= ff.first_fail_step;
     #     """)
 
+    print("Done! Label anchors inserted.")
+
     # Done inserting; now assign label_trace_id
     assign_label_trace_ids(conn, distance_threshold=50.0)
+    print("Done! label_trace_id assigned.")
+
+    # Compute 3D bounding boxes
+    bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
+    print("Done! 3D bounding boxes computed.")
+
+    # Visualize them in 3D
+    visualize_3d_bounding_boxes(bounding_boxes)
 
     conn.close()
-    print("Done! Label anchors inserted.")
+
 
 
 if __name__ == "__main__":

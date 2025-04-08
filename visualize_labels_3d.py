@@ -57,7 +57,7 @@ def get_faces_and_labels():
     # Get labels that fit inside polygons
     labels_sql = """
     SELECT l.label_id, l.face_id, l.step_value, l.feature_class, 
-           l.anchor_geom, l.angle, l.fits, l.name
+           l.anchor_geom, l.angle, l.fits, l.name, l.label_trace_id
     FROM label_anchors l
     WHERE l.fits = true;
     """
@@ -249,6 +249,30 @@ def create_3d_visualization(faces_df, labels_df):
                 ),
                 showlegend=False
             ))
+
+    # Draw movement trajectory lines for label trace groups
+    label_traces = labels_df.dropna(subset=['label_trace_id']).groupby(['label_trace_id', 'name'])
+
+    for (trace_id, name), group in label_traces:
+        group = group.sort_values('step_value')
+        x_vals = group['anchor_geom'].x.values
+        y_vals = group['anchor_geom'].y.values
+        z_vals = group['step_value'].values
+
+        fig.add_trace(go.Scatter3d(
+            x=x_vals,
+            y=y_vals,
+            z=z_vals,
+            mode='lines',
+            line=dict(
+                color='green',
+                width=3
+            ),
+            name=f"Trajectory: {name} ({trace_id})",
+            hoverinfo='text',
+            text=[f"Step: {step}" for step in z_vals],
+            showlegend=False  # You can enable this if desired
+        ))
     
 
     fig.update_layout(
