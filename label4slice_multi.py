@@ -7,6 +7,8 @@ from shapely.geometry import Point, LineString
 from shapely.algorithms.polylabel import polylabel
 from sqlalchemy import create_engine
 from urllib.parse import quote_plus
+from scipy.optimize import linear_sum_assignment
+from collections import defaultdict
 
 from scalestep import ScaleStep
 from genSkeleton import (
@@ -432,6 +434,246 @@ def insert_labels_into_anchors_table(conn, step_value, gpkg_file):
 
 
 ################################################################################
+# Trace anchor points across slices
+################################################################################
+def assign_label_trace_ids(conn, distance_threshold=50.0):
+    """
+    Post-process the label_anchors_from_slices table to group anchors from the same face
+    that persist across different steps into the same label_trace_id.
+
+    distance_threshold is how close two anchors must be (in map units)
+    to be considered the 'same' anchor in consecutive steps.
+    """
+    # 1) Add new column if it doesn't exist
+    with conn.cursor() as cur:
+        try:
+            cur.execute("ALTER TABLE label_anchors_from_slices ADD COLUMN label_trace_id BIGSERIAL;")
+            # If you want them uninitialized (NULL) initially, you can do so;
+            # or use a separate bigserial table. For demonstration, we'll just
+            # create the column and set it below.
+        except psycopg2.errors.DuplicateColumn:
+            # If it already exists, ignore
+            conn.rollback()
+
+    # 2) Fetch all anchors
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT label_id, face_id, step_value,
+                   ST_X(anchor_geom) AS x,
+                   ST_Y(anchor_geom) AS y
+            FROM label_anchors_from_slices
+            ORDER BY face_id, step_value;
+        """)
+        rows = cur.fetchall()
+
+    # Group by face_id
+    faces_map = defaultdict(list)
+    # Each entry: (label_id, step_value, x, y)
+    # Only match anchors within the same face to each other
+    for (lbl_id, face_id, step_val, x, y) in rows:
+        faces_map[face_id].append((lbl_id, step_val, x, y))
+
+    # We'll store label_id -> label_trace_id
+    assignments = {}
+
+    # a global trace counter,
+    next_trace_id = 1
+
+    for face_id, anchors in faces_map.items():
+        # Sort by ascending step_value
+        anchors.sort(key=lambda r: r[1])
+
+        # Split by step_value
+        from itertools import groupby
+        steps_data = [(step_val, list(grp))
+                      for step_val, grp in groupby(anchors, key=lambda r: r[1])]
+
+        # This will hold (trace_id, x, y) for anchors from the *previous* step
+        active_traces = []
+
+        for idx, (step_val, anchor_list) in enumerate(steps_data):
+            if idx == 0:
+                # All anchors in the first step get new trace IDs
+                for (lbl_id, stv, x, y) in anchor_list:
+                    assignments[lbl_id] = next_trace_id
+                    active_traces.append((next_trace_id, x, y))
+                    next_trace_id += 1
+            else:
+                # Match anchor_list to active_traces from the previous step
+                # Construct cost matrix for Hungarian method
+                import math
+
+                cost_matrix = []
+                for (t_id, ax, ay) in active_traces:
+                    row = []
+                    for (lbl_id, stv, x, y) in anchor_list:
+                        dist = math.hypot(x - ax, y - ay)
+                        row.append(dist)
+                    cost_matrix.append(row)
+
+                if cost_matrix:
+                    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+                else:
+                    row_ind, col_ind = [], []
+
+                # Track which anchors are matched
+                matched_anchors = set()
+                matched_rows = set()
+
+                new_active = []
+
+                # For each matched pair, if the distance is below threshold,
+                # treat them as the same trace.
+                for r_i, c_i in zip(row_ind, col_ind):
+                    dist = cost_matrix[r_i][c_i]
+                    if dist <= distance_threshold:
+                        trace_id, ax, ay = active_traces[r_i]
+                        lbl_id, stv, x, y = anchor_list[c_i]
+                        assignments[lbl_id] = trace_id
+                        matched_rows.add(r_i)
+                        matched_anchors.add(c_i)
+                        # Track the new location for that trace
+                        new_active.append((trace_id, x, y))
+
+                # Now, any anchor in this step that was not matched must be new
+                for c_i, (lbl_id, stv, x, y) in enumerate(anchor_list):
+                    if c_i not in matched_anchors:
+                        assignments[lbl_id] = next_trace_id
+                        new_active.append((next_trace_id, x, y))
+                        next_trace_id += 1
+
+                # active_traces for the next iteration
+                active_traces = new_active
+
+    # 3) Update the database
+    with conn.cursor() as cur:
+        for lbl_id, trace_id in assignments.items():
+            cur.execute("""
+                UPDATE label_anchors_from_slices
+                   SET label_trace_id = %s
+                 WHERE label_id = %s;
+            """, (trace_id, lbl_id))
+
+    conn.commit()
+    print("label_trace_id assigned to all anchors.")
+
+
+def compute_3d_bounding_boxes(conn, create_table=True):
+    """
+    For each label_trace_id, compute an axis-aligned bounding box in x, y,
+    and step_value space. Then optionally store them in a new table for
+    further use or visualization.
+    """
+    if create_table:
+        with conn.cursor() as cur:
+            # Drop if exists for demonstration; remove in real environment
+            cur.execute("DROP TABLE IF EXISTS label_trace_3d_bounds_slices;")
+            # We will store minX, maxX, minY, maxY, minStep, maxStep
+            cur.execute("""
+                CREATE TABLE label_trace_3d_bounds_slices (
+                    label_trace_id BIGINT,
+                    min_x DOUBLE PRECISION,
+                    max_x DOUBLE PRECISION,
+                    min_y DOUBLE PRECISION,
+                    max_y DOUBLE PRECISION,
+                    min_step INTEGER,
+                    max_step INTEGER
+                );
+            """)
+        conn.commit()
+
+    # Fetch anchors grouped by label_trace_id
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT label_trace_id,
+                   ST_X(anchor_geom) as x,
+                   ST_Y(anchor_geom) as y,
+                   step_value
+            FROM label_anchors_from_slices
+            WHERE label_trace_id IS NOT NULL
+            ORDER BY label_trace_id;
+        """)
+        rows = cur.fetchall()
+
+    # Dictionary: trace_id -> list of (x, y, step)
+    trace_map = defaultdict(list)
+    for t_id, x, y, stp in rows:
+        trace_map[t_id].append((x, y, stp))
+
+    # Compute bounding boxes
+    bounding_boxes = {}
+    for t_id, coords in trace_map.items():
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        steps = [c[2] for c in coords]
+        min_x = min(xs)
+        max_x = max(xs)
+        min_y = min(ys)
+        max_y = max(ys)
+        min_stp = min(steps)
+        max_stp = max(steps)
+        bounding_boxes[t_id] = (min_x, max_x, min_y, max_y, min_stp, max_stp)
+
+    # Insert bounding boxes into table
+    if create_table:
+        with conn.cursor() as cur:
+            for t_id, (mnx, mxx, mny, mxy, mns, mxs) in bounding_boxes.items():
+                cur.execute("""
+                    INSERT INTO label_trace_3d_bounds_slices (
+                        label_trace_id,
+                        min_x, max_x, min_y, max_y,
+                        min_step, max_step
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s);
+                """, (t_id, mnx, mxx, mny, mxy, mns, mxs))
+        conn.commit()
+
+    return bounding_boxes
+
+
+def visualize_3d_bounding_boxes(bounding_boxes):
+    """
+    Create a very simple 3D plot of each axis-aligned bounding box using Matplotlib.
+    """
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Step')
+
+    for t_id, (min_x, max_x, min_y, max_y, min_step, max_step) in bounding_boxes.items():
+        # "Corners" of the 3D box
+        corners = [
+            (min_x, min_y, min_step),
+            (min_x, min_y, max_step),
+            (min_x, max_y, min_step),
+            (min_x, max_y, max_step),
+            (max_x, min_y, min_step),
+            (max_x, min_y, max_step),
+            (max_x, max_y, min_step),
+            (max_x, max_y, max_step),
+        ]
+        # We'll draw line segments between these corners
+        # For an axis-aligned box, we have 12 edges:
+        edges = [
+            (0,1), (0,2), (0,4), (7,3), (7,5), (7,6), (1,3), (1,5), (2,3), (2,6), (4,5), (4,6)
+        ]
+        for (i, j) in edges:
+            p1 = corners[i]
+            p2 = corners[j]
+            xs = [p1[0], p2[0]]
+            ys = [p1[1], p2[1]]
+            zs = [p1[2], p2[2]]
+            ax.plot(xs, ys, zs)
+
+    plt.title("3D Bounding Boxes by label_trace_id")
+    plt.show()
+
+
+################################################################################
 # Main flow
 ################################################################################
 def main(use_intermediate_files=False):
@@ -489,13 +731,29 @@ def main(use_intermediate_files=False):
 
             # Step C: Generate skeleton-labeled output
             skeleton_output_gpkg = f"gpkg/skeleton_output_{step_val}.gpkg"
-            generate_skeleton_labels(intermediate_gpkg, skeleton_output_gpkg, do_simplify=True, simplify_tolerance=10.0)
+            generate_skeleton_labels(intermediate_gpkg, skeleton_output_gpkg, do_simplify=True, simplify_tolerance=0.0)
 
             # Step D: Insert labels from skeleton output into label_anchors_from_slices
             insert_labels_into_anchors_table(conn, step_val, skeleton_output_gpkg)
         else:
             # Process geometries directly without intermediate files
             process_geometries_directly(conn, step_val, do_simplify=True, simplify_tolerance=10.0)
+
+    # ------------------
+    # 4) Trace anchor points across slices
+    # ------------------
+    print("\n--- Tracing anchor points across slices ---")
+    assign_label_trace_ids(conn, distance_threshold=50.0)
+    
+    # ------------------
+    # 5) Compute and visualize 3D bounding boxes
+    # ------------------
+    print("\n--- Computing 3D bounding boxes ---")
+    bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
+
+    # Visualize the bounding boxes
+    print("\n--- Visualizing 3D bounding boxes ---")
+    visualize_3d_bounding_boxes(bounding_boxes)
 
     print("All slices processed. Check label_anchors_from_slices for results.")
     conn.close()
