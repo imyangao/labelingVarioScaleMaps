@@ -49,7 +49,7 @@ def get_faces_of_interest(conn):
                f.feature_class,
                y.name
         FROM yan_tgap_face f
-        LEFT JOIN yan_face y
+        LEFT JOIN yan_face_clone y
           ON y.face_id = f.face_id
         WHERE (
              (f.feature_class >= {ROAD_MIN} AND f.feature_class < {ROAD_MAX})
@@ -423,7 +423,7 @@ def compute_3d_bounding_boxes(conn, create_table=True):
                    ST_Y(anchor_geom) as y,
                    step_value
             FROM label_anchors
-            WHERE label_trace_id IS NOT NULL
+            WHERE label_trace_id IS NOT NULL AND fits is TRUE
             ORDER BY label_trace_id;
         """)
         rows = cur.fetchall()
@@ -647,8 +647,14 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
                     ])
                     rotated_rect = rotate(rect, angle, origin=anchor_pt)
 
-                    # Check containment
-                    fits = rotated_rect.within(poly_shp) if poly_shp else False
+                    # # Check containment
+                    # fits = rotated_rect.within(poly_shp) if poly_shp else False
+                    if poly_shp and rotated_rect.is_valid and rotated_rect.area > 0:
+                        intersection_area = rotated_rect.intersection(poly_shp).area
+                        overlap_ratio = intersection_area / rotated_rect.area
+                        fits = overlap_ratio >= 0.70  # threshold
+                    else:
+                        fits = False
 
                 # Insert into database
                 with conn.cursor() as cur:
@@ -697,5 +703,5 @@ if __name__ == "__main__":
     #   2) with simplification
     #       main(do_simplify=True, simplify_tolerance=5.0)
 
-    main(do_simplify=True, simplify_tolerance=5.0, font_size=10)
+    main(do_simplify=True, simplify_tolerance=1.0, font_size=16)
 
