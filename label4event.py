@@ -274,12 +274,12 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
     import math
     from collections import defaultdict
 
-    # 1) Add new column if it doesn’t exist
+    # 1) Add new column if it doesn't exist
     with conn.cursor() as cur:
         try:
             cur.execute("ALTER TABLE label_anchors ADD COLUMN label_trace_id BIGSERIAL;")
             # If you want them uninitialized (NULL) initially, you can do so;
-            # or use a separate bigserial table. For demonstration, we’ll just
+            # or use a separate bigserial table. For demonstration, we'll just
             # create the column and set it below.
         except psycopg2.errors.DuplicateColumn:
             # If it already exists, ignore
@@ -620,6 +620,10 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
     font_path = "C:/Users/17731/Downloads/Roboto/static/Roboto_Condensed-Light.ttf"
     font = ImageFont.truetype(font_path, font_size)
 
+    # Dictionary to track previous anchors for each face
+    # Format: {face_id: {step_value: [(point, angle), ...]}}
+    previous_anchors = {}
+
     # Each row: (face_id, step_low, step_high, feature_class, name)
     for (face_id, f_low, f_high, fclass, face_name) in faces:
         edges = get_edges_for_face(conn, face_id, f_low, f_high)
@@ -685,6 +689,39 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
                 c = poly_shp.centroid
                 anchors = [(c, 0.0)]
 
+            # Find the previous step with anchors for this face
+            prev_step = None
+            prev_anchors = None
+            if face_id in previous_anchors:
+                # Find the highest step less than current step that has anchors
+                for step in sorted(previous_anchors[face_id].keys(), reverse=True):
+                    if step < S and previous_anchors[face_id][step]:
+                        prev_step = step
+                        prev_anchors = previous_anchors[face_id][step]
+                        break
+
+            # If we have previous anchors, limit current anchors based on proximity
+            if prev_anchors and len(anchors) > len(prev_anchors):
+                # Create a list of (current_anchor, min_distance_to_prev_anchors)
+                anchor_distances = []
+                for curr_anchor in anchors:
+                    min_dist = min(
+                        curr_anchor[0].distance(prev_anchor[0])
+                        for prev_anchor in prev_anchors
+                    )
+                    anchor_distances.append((curr_anchor, min_dist))
+                
+                # Sort by minimum distance to previous anchors
+                anchor_distances.sort(key=lambda x: x[1])
+                
+                # Keep only the closest anchors
+                anchors = [anchor for anchor, _ in anchor_distances[:len(prev_anchors)]]
+
+            # Store current anchors for future reference
+            if face_id not in previous_anchors:
+                previous_anchors[face_id] = {}
+            previous_anchors[face_id][S] = anchors
+
             # Insert anchors
             for (anchor_pt, angle) in anchors:
                 wkt = anchor_pt.wkt
@@ -697,9 +734,6 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
                     resolution_mpp = ScaleStep.resolution_mpp(scale_denominator, ppi=96)
 
                     # Calculate label dimensions in meters
-                    # num_chars = len(label_text)
-                    # label_width_px = num_chars * 10  # Approx. 10px per character
-                    # label_height_px = font_size
                     bbox = font.getbbox(label_text)
                     width_px = bbox[2] - bbox[0]
                     height_px = bbox[3] - bbox[1]
@@ -718,8 +752,6 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
                     ])
                     rotated_rect = rotate(rect, angle, origin=anchor_pt)
 
-                    # # Check containment
-                    # fits = rotated_rect.within(poly_shp) if poly_shp else False
                     if poly_shp and rotated_rect.is_valid and rotated_rect.area > 0:
                         intersection_area = rotated_rect.intersection(poly_shp).area
                         overlap_ratio = intersection_area / rotated_rect.area
@@ -781,5 +813,5 @@ if __name__ == "__main__":
     #       main(do_simplify=True, simplify_tolerance=5.0)
 
     main(do_simplify=True, simplify_tolerance=1.0, font_size=16,
-         enforce_first_fail=False, propagate_topdown=True)
+         enforce_first_fail=False)
 
