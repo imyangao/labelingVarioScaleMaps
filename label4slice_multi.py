@@ -67,6 +67,15 @@ def process_geometries_directly(conn, step_value, do_simplify=True, simplify_tol
     Process geometries directly from the database for a given step_value,
     compute anchor points based on feature_class, and insert them into the anchors table.
     """
+    # Dictionary to track previous anchors for each face
+    # Format: {face_id: {step_value: [(point, angle), ...]}}
+    # Make it global so it persists between calls
+    global previous_anchors
+    if 'previous_anchors' not in globals():
+        previous_anchors = {}
+
+    print(f"\nProcessing step {step_value}")
+
     # Query to get all faces at the specified step
     sql = f"""
     WITH polygonized_edges AS (
@@ -111,13 +120,74 @@ def process_geometries_directly(conn, step_value, do_simplify=True, simplify_tol
                 
             # Process based on feature_class
             if 10000 <= feature_class < 11000:  # Roads
-                process_road_geometry(conn, step_value, polygon, feature_class, face_id, name, 
+                anchors = process_road_geometry(conn, step_value, polygon, feature_class, face_id, name, 
                                      do_simplify, simplify_tolerance)
             elif 12000 <= feature_class < 13000:  # Water
-                process_water_geometry(conn, step_value, polygon, feature_class, face_id, name, 
+                anchors = process_water_geometry(conn, step_value, polygon, feature_class, face_id, name, 
                                        do_simplify, simplify_tolerance)
             elif 13000 <= feature_class < 14000:  # Buildings
-                process_building_geometry(conn, step_value, polygon, feature_class, face_id, name)
+                anchors = process_building_geometry(conn, step_value, polygon, feature_class, face_id, name)
+            else:
+                anchors = None
+
+            if anchors:
+                # # Debug: Print current anchor count
+                # print(f"Face {face_id} at step {step_value}: {len(anchors)} anchors")
+
+                # Find the previous step with anchors for this face
+                prev_step = None
+                prev_anchors = None
+                if face_id in previous_anchors:
+                    # Find the highest step less than current step that has anchors
+                    for step in sorted(previous_anchors[face_id].keys(), reverse=True):
+                        if step < step_value and previous_anchors[face_id][step]:
+                            prev_step = step
+                            prev_anchors = previous_anchors[face_id][step]
+                            # print(f"  Previous step {prev_step} had {len(prev_anchors)} anchors")
+                            break
+
+                # If we have previous anchors and current anchors exceed the previous count
+                if prev_anchors and len(anchors) > len(prev_anchors):
+                    print(f"  Reducing from {len(anchors)} to {len(prev_anchors)} anchors")
+                    # Create a list of (current_anchor, min_distance_to_prev_anchors)
+                    anchor_distances = []
+                    for curr_anchor in anchors:
+                        min_dist = min(
+                            curr_anchor[0].distance(prev_anchor[0])
+                            for prev_anchor in prev_anchors
+                        )
+                        anchor_distances.append((curr_anchor, min_dist))
+                    
+                    # Sort by minimum distance to previous anchors
+                    anchor_distances.sort(key=lambda x: x[1])
+                    
+                    # Keep only the closest anchors, not exceeding the previous count
+                    anchors = [anchor for anchor, _ in anchor_distances[:len(prev_anchors)]]
+
+                # Store current anchors for future reference
+                if face_id not in previous_anchors:
+                    previous_anchors[face_id] = {}
+                previous_anchors[face_id][step_value] = anchors
+
+                # Insert anchors into database
+                insert_sql = """
+                INSERT INTO label_anchors_from_slices
+                (step_value, face_id, feature_class, name, anchor_geom, angle)
+                VALUES (%s, %s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 28992), %s);
+                """
+                
+                with conn.cursor() as cur:
+                    for anchor_pt, angle in anchors:
+                        cur.execute(insert_sql, (
+                            step_value,
+                            face_id,
+                            feature_class,
+                            name,
+                            anchor_pt.wkt,
+                            angle
+                        ))
+                
+                conn.commit()
                 
         except Exception as e:
             print(f"Error processing geometry at index {idx}: {e}")
@@ -125,7 +195,7 @@ def process_geometries_directly(conn, step_value, do_simplify=True, simplify_tol
 
 def process_road_geometry(conn, step_value, polygon, feature_class, face_id, name, 
                          do_simplify, simplify_tolerance):
-    """Process road geometry and insert anchor points into the database."""
+    """Process road geometry and return anchor points."""
     # Optional polygon simplification
     if do_simplify and simplify_tolerance > 0:
         poly_for_skel = polygon.simplify(simplify_tolerance, preserve_topology=True)
@@ -135,14 +205,14 @@ def process_road_geometry(conn, step_value, polygon, feature_class, face_id, nam
     # Build raw skeleton
     raw_skel_lines = build_skeleton_lines(poly_for_skel)
     if not raw_skel_lines:
-        return
+        return None
 
     # Convert to graph -> find junctions -> connect them
     G = lines_to_graph(raw_skel_lines)
     junctions = get_junction_nodes(G, min_degree=3)
     if len(junctions) < 2:
         # not enough skeleton complexity
-        return
+        return None
 
     primary_paths = find_junction_to_junction_paths(G, junctions)
     merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
@@ -156,47 +226,32 @@ def process_road_geometry(conn, step_value, polygon, feature_class, face_id, nam
     else:
         length_threshold = 0.0
 
-    # Insert anchor points into the database
-    insert_sql = """
-    INSERT INTO label_anchors_from_slices
-    (step_value, face_id, feature_class, name, anchor_geom, angle)
-    VALUES (%s, %s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 28992), %s);
-    """
-    
-    with conn.cursor() as cur:
-        for line in sorted_lines:
-            if line.length < length_threshold:
-                break  # lines are sorted desc, so break as soon as below threshold
+    anchors = []
+    for line in sorted_lines:
+        if line.length < length_threshold:
+            break  # lines are sorted desc, so break as soon as below threshold
 
-            # Compute midpoint and angle
-            midpoint = line.interpolate(0.5, normalized=True)
-            (x1, y1) = line.coords[0]
-            (x2, y2) = line.coords[-1]
-            dx = x2 - x1
-            dy = y2 - y1
-            angle_deg = math.degrees(math.atan2(dy, dx))
-            # Constrain angle to -90..90
-            if angle_deg > 90:
-                angle_deg -= 180
-            elif angle_deg < -90:
-                angle_deg += 180
+        # Compute midpoint and angle
+        midpoint = line.interpolate(0.5, normalized=True)
+        (x1, y1) = line.coords[0]
+        (x2, y2) = line.coords[-1]
+        dx = x2 - x1
+        dy = y2 - y1
+        angle_deg = math.degrees(math.atan2(dy, dx))
+        # Constrain angle to -90..90
+        if angle_deg > 90:
+            angle_deg -= 180
+        elif angle_deg < -90:
+            angle_deg += 180
 
-            # Insert into database
-            cur.execute(insert_sql, (
-                step_value,
-                face_id,
-                feature_class,
-                name,
-                midpoint.wkt,
-                angle_deg
-            ))
-    
-    conn.commit()
+        anchors.append((midpoint, angle_deg))
+
+    return anchors
 
 
 def process_water_geometry(conn, step_value, polygon, feature_class, face_id, name, 
                           do_simplify, simplify_tolerance):
-    """Process water geometry and insert anchor points into the database."""
+    """Process water geometry and return anchor points."""
     # Optional polygon simplification
     if do_simplify and simplify_tolerance > 0:
         poly_for_skel = polygon.simplify(simplify_tolerance, preserve_topology=True)
@@ -206,13 +261,13 @@ def process_water_geometry(conn, step_value, polygon, feature_class, face_id, na
     # Build raw skeleton
     raw_skel_lines = build_skeleton_lines(poly_for_skel)
     if not raw_skel_lines:
-        return
+        return None
 
     # Convert to graph -> find junctions -> connect them
     G = lines_to_graph(raw_skel_lines)
     junctions = get_junction_nodes(G, min_degree=3)
     if len(junctions) < 2:
-        return
+        return None
 
     primary_paths = find_junction_to_junction_paths(G, junctions)
     merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
@@ -226,44 +281,29 @@ def process_water_geometry(conn, step_value, polygon, feature_class, face_id, na
     else:
         length_threshold = 0.0
 
-    # Insert anchor points into the database
-    insert_sql = """
-    INSERT INTO label_anchors_from_slices
-    (step_value, face_id, feature_class, name, anchor_geom, angle)
-    VALUES (%s, %s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 28992), %s);
-    """
-    
-    with conn.cursor() as cur:
-        for line in sorted_lines:
-            if line.length < length_threshold:
-                break
+    anchors = []
+    for line in sorted_lines:
+        if line.length < length_threshold:
+            break
 
-            midpoint = line.interpolate(0.5, normalized=True)
-            (x1, y1) = line.coords[0]
-            (x2, y2) = line.coords[-1]
-            dx = x2 - x1
-            dy = y2 - y1
-            angle_deg = math.degrees(math.atan2(dy, dx))
-            if angle_deg > 90:
-                angle_deg -= 180
-            elif angle_deg < -90:
-                angle_deg += 180
+        midpoint = line.interpolate(0.5, normalized=True)
+        (x1, y1) = line.coords[0]
+        (x2, y2) = line.coords[-1]
+        dx = x2 - x1
+        dy = y2 - y1
+        angle_deg = math.degrees(math.atan2(dy, dx))
+        if angle_deg > 90:
+            angle_deg -= 180
+        elif angle_deg < -90:
+            angle_deg += 180
 
-            # Insert into database
-            cur.execute(insert_sql, (
-                step_value,
-                face_id,
-                feature_class,
-                name,
-                midpoint.wkt,
-                angle_deg
-            ))
-    
-    conn.commit()
+        anchors.append((midpoint, angle_deg))
+
+    return anchors
 
 
 def process_building_geometry(conn, step_value, polygon, feature_class, face_id, name):
-    """Process building geometry and insert anchor points into the database."""
+    """Process building geometry and return anchor points."""
     center, radius = largest_inscribed_circle(polygon)
     if center is not None:
         # Calculate rotation angle from minimum rotated rectangle
@@ -287,24 +327,8 @@ def process_building_geometry(conn, step_value, polygon, feature_class, face_id,
         elif best_angle < -90:
             best_angle += 180
 
-        # Insert into database
-        insert_sql = """
-        INSERT INTO label_anchors_from_slices
-        (step_value, face_id, feature_class, name, anchor_geom, angle)
-        VALUES (%s, %s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 28992), %s);
-        """
-        
-        with conn.cursor() as cur:
-            cur.execute(insert_sql, (
-                step_value,
-                face_id,
-                feature_class,
-                name,
-                center.wkt,
-                best_angle
-            ))
-        
-        conn.commit()
+        return [(center, best_angle)]
+    return None
 
 
 ################################################################################
@@ -707,12 +731,11 @@ def main(use_intermediate_files=False):
 
     print("Using denominators:", denominators)
 
-    # Or a user-defined set, e.g.: denominators = [10000, 25000, 50000, 100000, ...]
-
     # ------------------
     # 3) For each denominator, calculate the step -> generate anchors -> store in table
     # ------------------
-    for denom in denominators:
+    # Process steps in ascending order to ensure proper anchor tracking
+    for denom in sorted(denominators):
         step_val = scale_step.step_for_scale(denom)
         step_val = int(round(step_val, 0))
 
