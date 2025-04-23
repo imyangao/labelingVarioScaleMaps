@@ -507,10 +507,81 @@ def visualize_3d_bounding_boxes(bounding_boxes):
     plt.show()
 
 
+def commit_to_first_anchor_only(conn):
+    """Implements Method 1 (SQL post‑processing).
+
+    For every *label_trace_id* that ever goes `fits = FALSE`, force every later step to
+    be *FALSE* as well so that visibility becomes a monotone non‑increasing function of
+    *step_value*.
+    """
+    sql = """
+    WITH first_bad AS (
+        SELECT label_trace_id,
+               MIN(step_value) AS fail_at
+        FROM   label_anchors
+        WHERE  fits = FALSE
+        GROUP  BY label_trace_id
+    )
+    UPDATE label_anchors AS la
+    SET    fits = FALSE
+    FROM   first_bad AS fb
+    WHERE  la.label_trace_id = fb.label_trace_id
+       AND la.step_value    > fb.fail_at;
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+    print("[post] commit_to_first_anchor_only() finished – monotone fits enforced.")
+
+
+# def propagate_anchors_topdown(conn):
+#     """Implements Method 2 (top‑down propagation) *purely in SQL*.
+#
+#     The idea is:
+#     * start from each trace's smallest *step_value* that still *fits*
+#     * let those anchors be the canonical representatives
+#     * delete any anchor at a **larger** step that has no earlier TRUE entry inside the
+#       same trace.
+#
+#     After this call, for any given *label_trace_id* the set of rows with `fits=TRUE`
+#     forms a chain S < T < …; no orphan TRUEs are left at coarser steps.
+#     """
+#     sql_drop_tmp = "DROP TABLE IF EXISTS tmp_first_good;"
+#     sql_first_good = """
+#         CREATE TEMP TABLE tmp_first_good AS
+#         SELECT   label_trace_id,
+#                  MIN(step_value) AS first_ok_step
+#         FROM     label_anchors
+#         WHERE    fits = TRUE
+#         GROUP BY label_trace_id;
+#     """
+#     sql_delete_orphans = """
+#         DELETE FROM label_anchors AS la
+#         USING  tmp_first_good AS fg
+#         WHERE  la.label_trace_id = fg.label_trace_id
+#           AND  la.step_value   > fg.first_ok_step
+#           AND  la.fits = TRUE   -- only delete the stray TRUEs
+#           AND NOT EXISTS (
+#                 SELECT 1
+#                 FROM   label_anchors AS earlier
+#                 WHERE  earlier.label_trace_id = la.label_trace_id
+#                   AND  earlier.step_value   < la.step_value
+#                   AND  earlier.fits = TRUE);
+#     """
+#     with conn.cursor() as cur:
+#         cur.execute(sql_drop_tmp)
+#         cur.execute(sql_first_good)
+#         cur.execute(sql_delete_orphans)
+#     conn.commit()
+#     print("[post] propagate_anchors_topdown() finished – subset relation enforced.")
+
+
 ##############################################################################
 # Main pipeline
 ##############################################################################
-def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
+# def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
+def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
+             enforce_first_fail=True):
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
@@ -685,6 +756,12 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
     assign_label_trace_ids(conn, distance_threshold=50.0)
     print("Done! label_trace_id assigned.")
 
+    if enforce_first_fail:
+        commit_to_first_anchor_only(conn)
+
+    # if propagate_topdown:
+    #     propagate_anchors_topdown(conn)
+
     # Compute 3D bounding boxes
     bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
     print("Done! 3D bounding boxes computed.")
@@ -703,5 +780,6 @@ if __name__ == "__main__":
     #   2) with simplification
     #       main(do_simplify=True, simplify_tolerance=5.0)
 
-    main(do_simplify=True, simplify_tolerance=1.0, font_size=16)
+    main(do_simplify=True, simplify_tolerance=1.0, font_size=16,
+         enforce_first_fail=False, propagate_topdown=True)
 
