@@ -81,7 +81,7 @@ def process_geometries_directly(conn, step_value, do_simplify=True, simplify_tol
     WITH polygonized_edges AS (
         SELECT
             (ST_Dump(ST_Polygonize(e.geometry))).geom::geometry(Polygon, 28992) AS polygon_geom
-        FROM yan_tgap_edge e
+        FROM newyan_tgap_edge e
         WHERE e.step_low <= {step_value} AND e.step_high > {step_value}
     )
     SELECT
@@ -90,9 +90,9 @@ def process_geometries_directly(conn, step_value, do_simplify=True, simplify_tol
         f.feature_class,
         ff.name
     FROM polygonized_edges p
-    JOIN yan_tgap_face f
+    JOIN newyan_tgap_face f
       ON ST_Contains(p.polygon_geom, f.pip_geometry)
-    LEFT JOIN yan_face ff
+    LEFT JOIN newyan_face ff
       ON ff.face_id = f.face_id
     WHERE f.step_low <= {step_value} 
       AND f.step_high > {step_value};
@@ -338,7 +338,7 @@ def create_slice_table(conn, step_value):
     """
     Creates a slice table for the specified step_value
     """
-    table_name = f"yan_topo2geom_{step_value}_enriched"
+    table_name = f"newyan_topo2geom_{step_value}_enriched"
     drop_sql = f"DROP TABLE IF EXISTS {table_name};"
 
     create_sql = f"""
@@ -346,7 +346,7 @@ def create_slice_table(conn, step_value):
     WITH polygonized_edges AS (
         SELECT
             (ST_Dump(ST_Polygonize(e.geometry))).geom::geometry(Polygon, 28992) AS polygon_geom
-        FROM yan_tgap_edge e
+        FROM newyan_tgap_edge e
         WHERE e.step_low <= {step_value} AND e.step_high > {step_value}
     )
     SELECT
@@ -355,9 +355,9 @@ def create_slice_table(conn, step_value):
         f.feature_class,
         ff.name
     FROM polygonized_edges p
-    JOIN yan_tgap_face f
+    JOIN newyan_tgap_face f
       ON ST_Contains(p.polygon_geom, f.pip_geometry)
-    LEFT JOIN yan_face ff
+    LEFT JOIN newyan_face ff
       ON ff.face_id = f.face_id
     WHERE f.step_low <= {step_value} 
       AND f.step_high > {step_value};
@@ -374,7 +374,7 @@ def export_slice_to_gpkg(conn, step_value, out_gpkg):
     """
     Reads the slice table from PostGIS into a GeoDataFrame and writes it to .gpkg.
     """
-    table_name = f"yan_topo2geom_{step_value}_enriched"
+    table_name = f"newyan_topo2geom_{step_value}_enriched"
     sql = f"SELECT face_id, feature_class, name, polygon_geom FROM {table_name};"
 
     gdf = gpd.read_postgis(sql, engine, geom_col="polygon_geom")
@@ -430,6 +430,12 @@ def insert_labels_into_anchors_table(conn, step_value, gpkg_file):
     VALUES (%s, %s, %s, %s, ST_SetSRID(ST_GeomFromText(%s), 28992), %s);
     """
 
+    # Dictionary to track previous anchors for each face
+    # Format: {face_id: {step_value: [(point, angle), ...]}}
+    global previous_anchors
+    if 'previous_anchors' not in globals():
+        previous_anchors = {}
+
     with conn.cursor() as cur:
         for lyr in candidate_label_layers:
             if lyr in layers:
@@ -438,21 +444,63 @@ def insert_labels_into_anchors_table(conn, step_value, gpkg_file):
                 # Some skeleton code might store angle under 'rotation'
                 angle_col = "angle" if "angle" in gdf.columns else "rotation"
 
+                # Group anchors by face_id
+                face_anchors = defaultdict(list)
                 for _, row in gdf.iterrows():
                     face_id = row.get("face_id")
                     fclass = row.get("feature_class")
                     name = row.get("name")
                     angle = row.get(angle_col, 0.0)
+                    geom = row["geometry"]
+                    face_anchors[face_id].append((geom, angle, fclass, name))
 
-                    geom_wkt = row["geometry"].wkt
-                    cur.execute(insert_sql, (
-                        step_value,
-                        face_id,
-                        fclass,
-                        name,
-                        geom_wkt,
-                        angle
-                    ))
+                # Process each face's anchors
+                for face_id, anchors in face_anchors.items():
+                    # Find the previous step with anchors for this face
+                    prev_step = None
+                    prev_anchors = None
+                    if face_id in previous_anchors:
+                        # Find the highest step less than current step that has anchors
+                        for step in sorted(previous_anchors[face_id].keys(), reverse=True):
+                            if step < step_value and previous_anchors[face_id][step]:
+                                prev_step = step
+                                prev_anchors = previous_anchors[face_id][step]
+                                break
+
+                    # If we have previous anchors and current anchors exceed the previous count
+                    if prev_anchors and len(anchors) > len(prev_anchors):
+                        print(f"  Reducing from {len(anchors)} to {len(prev_anchors)} anchors for face {face_id}")
+                        # Create a list of (current_anchor, min_distance_to_prev_anchors)
+                        anchor_distances = []
+                        for curr_anchor in anchors:
+                            min_dist = min(
+                                curr_anchor[0].distance(prev_anchor[0])
+                                for prev_anchor in prev_anchors
+                            )
+                            anchor_distances.append((curr_anchor, min_dist))
+                        
+                        # Sort by minimum distance to previous anchors
+                        anchor_distances.sort(key=lambda x: x[1])
+                        
+                        # Keep only the closest anchors, not exceeding the previous count
+                        anchors = [anchor for anchor, _ in anchor_distances[:len(prev_anchors)]]
+
+                    # Store current anchors for future reference
+                    if face_id not in previous_anchors:
+                        previous_anchors[face_id] = {}
+                    previous_anchors[face_id][step_value] = [(geom, angle) for geom, angle, _, _ in anchors]
+
+                    # Insert the anchors into the database
+                    for geom, angle, fclass, name in anchors:
+                        geom_wkt = geom.wkt
+                        cur.execute(insert_sql, (
+                            step_value,
+                            face_id,
+                            fclass,
+                            name,
+                            geom_wkt,
+                            angle
+                        ))
 
     conn.commit()
 
@@ -462,21 +510,21 @@ def insert_labels_into_anchors_table(conn, step_value, gpkg_file):
 ################################################################################
 def assign_label_trace_ids(conn, distance_threshold=50.0):
     """
-    Post-process the label_anchors_from_slices table to group anchors from the same face
+    Post-process the label_anchors table to group anchors from the same face
     that persist across different steps into the same label_trace_id.
 
     distance_threshold is how close two anchors must be (in map units)
     to be considered the 'same' anchor in consecutive steps.
     """
+    from scipy.optimize import linear_sum_assignment
+    import math
+    from collections import defaultdict
+
     # 1) Add new column if it doesn't exist
     with conn.cursor() as cur:
         try:
             cur.execute("ALTER TABLE label_anchors_from_slices ADD COLUMN label_trace_id BIGSERIAL;")
-            # If you want them uninitialized (NULL) initially, you can do so;
-            # or use a separate bigserial table. For demonstration, we'll just
-            # create the column and set it below.
         except psycopg2.errors.DuplicateColumn:
-            # If it already exists, ignore
             conn.rollback()
 
     # 2) Fetch all anchors
@@ -492,15 +540,11 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
 
     # Group by face_id
     faces_map = defaultdict(list)
-    # Each entry: (label_id, step_value, x, y)
-    # Only match anchors within the same face to each other
     for (lbl_id, face_id, step_val, x, y) in rows:
         faces_map[face_id].append((lbl_id, step_val, x, y))
 
     # We'll store label_id -> label_trace_id
     assignments = {}
-
-    # a global trace counter,
     next_trace_id = 1
 
     for face_id, anchors in faces_map.items():
@@ -523,52 +567,39 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
                     active_traces.append((next_trace_id, x, y))
                     next_trace_id += 1
             else:
-                # Match anchor_list to active_traces from the previous step
-                # Construct cost matrix for Hungarian method
-                import math
-
-                cost_matrix = []
-                for (t_id, ax, ay) in active_traces:
-                    row = []
-                    for (lbl_id, stv, x, y) in anchor_list:
-                        dist = math.hypot(x - ax, y - ay)
-                        row.append(dist)
-                    cost_matrix.append(row)
-
-                if cost_matrix:
-                    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-                else:
-                    row_ind, col_ind = [], []
-
-                # Track which anchors are matched
-                matched_anchors = set()
-                matched_rows = set()
-
+                # Since we know previous step has more or equal anchors,
+                # we can directly match current anchors to their closest previous anchors
                 new_active = []
+                matched_prev_indices = set()
 
-                # For each matched pair, if the distance is below threshold,
-                # treat them as the same trace.
-                for r_i, c_i in zip(row_ind, col_ind):
-                    dist = cost_matrix[r_i][c_i]
-                    if dist <= distance_threshold:
-                        trace_id, ax, ay = active_traces[r_i]
-                        lbl_id, stv, x, y = anchor_list[c_i]
+                # For each current anchor, find the closest previous anchor
+                for (lbl_id, stv, x, y) in anchor_list:
+                    min_dist = float('inf')
+                    best_prev_idx = -1
+
+                    # Find closest previous anchor
+                    for i, (t_id, px, py) in enumerate(active_traces):
+                        if i in matched_prev_indices:
+                            continue
+                        dist = math.hypot(x - px, y - py)
+                        if dist < min_dist and dist <= distance_threshold:
+                            min_dist = dist
+                            best_prev_idx = i
+
+                    if best_prev_idx != -1:
+                        # Match found - use the same trace_id
+                        trace_id = active_traces[best_prev_idx][0]
                         assignments[lbl_id] = trace_id
-                        matched_rows.add(r_i)
-                        matched_anchors.add(c_i)
-                        # Track the new location for that trace
+                        matched_prev_indices.add(best_prev_idx)
                         new_active.append((trace_id, x, y))
-
-                # Now, any anchor in this step that was not matched must be new
-                for c_i, (lbl_id, stv, x, y) in enumerate(anchor_list):
-                    if c_i not in matched_anchors:
+                    else:
+                        # No match found - create new trace_id
                         assignments[lbl_id] = next_trace_id
                         new_active.append((next_trace_id, x, y))
                         next_trace_id += 1
 
-                # active_traces for the next iteration
+                # Update active_traces for next iteration
                 active_traces = new_active
-
     # 3) Update the database
     with conn.cursor() as cur:
         for lbl_id, trace_id in assignments.items():
@@ -580,7 +611,6 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
 
     conn.commit()
     print("label_trace_id assigned to all anchors.")
-
 
 def compute_3d_bounding_boxes(conn, create_table=True):
     """
@@ -718,8 +748,8 @@ def main(use_intermediate_files=False):
     # ------------------
     # 2) Decide on base scale denominator
     # ------------------
-    base_denominator = 10_000
-    dataset_name = "yan"
+    base_denominator = 10000
+    dataset_name = "newyan"
     scale_step = ScaleStep(init_scale=base_denominator, topo_nm=dataset_name)
 
     # Example: gather some denominators by doubling from the base
@@ -754,13 +784,13 @@ def main(use_intermediate_files=False):
 
             # Step C: Generate skeleton-labeled output
             skeleton_output_gpkg = f"gpkg/skeleton_output_{step_val}.gpkg"
-            generate_skeleton_labels(intermediate_gpkg, skeleton_output_gpkg, do_simplify=True, simplify_tolerance=0.0)
+            generate_skeleton_labels(intermediate_gpkg, skeleton_output_gpkg, do_simplify=True, simplify_tolerance=1.0)
 
             # Step D: Insert labels from skeleton output into label_anchors_from_slices
             insert_labels_into_anchors_table(conn, step_val, skeleton_output_gpkg)
         else:
             # Process geometries directly without intermediate files
-            process_geometries_directly(conn, step_val, do_simplify=True, simplify_tolerance=10.0)
+            process_geometries_directly(conn, step_val, do_simplify=True, simplify_tolerance=1.0)
 
     # ------------------
     # 4) Trace anchor points across slices
