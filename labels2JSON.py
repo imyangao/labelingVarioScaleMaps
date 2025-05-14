@@ -21,12 +21,11 @@ sql = """
         la.feature_class,
         la.name,
         ST_AsGeoJSON(la.anchor_geom)::json AS anchor_geom,
-        ST_AsGeoJSON(la.face_geom)::json   AS face_geom,
         la.angle,
-        la.fits,
         la.label_trace_id
-    FROM        label_anchors  la
+    FROM        label_anchors_from_slices  la
     JOIN        yan_tgap_face  f  ON f.face_id = la.face_id
+    WHERE la.name is not null
     ORDER BY    la.label_id;
 """
 
