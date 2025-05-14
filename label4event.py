@@ -48,8 +48,8 @@ def get_faces_of_interest(conn):
                f.step_high,
                f.feature_class,
                y.name
-        FROM yan_tgap_face f
-        LEFT JOIN yan_face_clone y
+        FROM newyan_tgap_face f
+        LEFT JOIN newyan_face y
           ON y.face_id = f.face_id
         WHERE (
              (f.feature_class >= {ROAD_MIN} AND f.feature_class < {ROAD_MAX})
@@ -80,7 +80,7 @@ def get_edges_for_face(conn, face_id, face_step_low, face_step_high):
       right_face_id_high,
       edge_class,
       ST_AsBinary(geometry) AS geom_wkb
-    FROM yan_tgap_edge
+    FROM newyan_tgap_edge
     WHERE
       step_high > %s
       AND step_low < %s
@@ -278,11 +278,7 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
     with conn.cursor() as cur:
         try:
             cur.execute("ALTER TABLE label_anchors ADD COLUMN label_trace_id BIGSERIAL;")
-            # If you want them uninitialized (NULL) initially, you can do so;
-            # or use a separate bigserial table. For demonstration, we'll just
-            # create the column and set it below.
         except psycopg2.errors.DuplicateColumn:
-            # If it already exists, ignore
             conn.rollback()
 
     # 2) Fetch all anchors
@@ -298,15 +294,11 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
 
     # Group by face_id
     faces_map = defaultdict(list)
-    # Each entry: (label_id, step_value, x, y)
-    # Only match anchors within the same face to each other
     for (lbl_id, face_id, step_val, x, y) in rows:
         faces_map[face_id].append((lbl_id, step_val, x, y))
 
     # We'll store label_id -> label_trace_id
     assignments = {}
-
-    # a global trace counter,
     next_trace_id = 1
 
     for face_id, anchors in faces_map.items():
@@ -329,50 +321,38 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
                     active_traces.append((next_trace_id, x, y))
                     next_trace_id += 1
             else:
-                # Match anchor_list to active_traces from the previous step
-                # Construct cost matrix for Hungarian method
-                import math
-
-                cost_matrix = []
-                for (t_id, ax, ay) in active_traces:
-                    row = []
-                    for (lbl_id, stv, x, y) in anchor_list:
-                        dist = math.hypot(x - ax, y - ay)
-                        row.append(dist)
-                    cost_matrix.append(row)
-
-                if cost_matrix:
-                    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-                else:
-                    row_ind, col_ind = [], []
-
-                # Track which anchors are matched
-                matched_anchors = set()
-                matched_rows = set()
-
+                # Since we know previous step has more or equal anchors,
+                # we can directly match current anchors to their closest previous anchors
                 new_active = []
+                matched_prev_indices = set()
 
-                # For each matched pair, if the distance is below threshold,
-                # treat them as the same trace.
-                for r_i, c_i in zip(row_ind, col_ind):
-                    dist = cost_matrix[r_i][c_i]
-                    if dist <= distance_threshold:
-                        trace_id, ax, ay = active_traces[r_i]
-                        lbl_id, stv, x, y = anchor_list[c_i]
+                # For each current anchor, find the closest previous anchor
+                for (lbl_id, stv, x, y) in anchor_list:
+                    min_dist = float('inf')
+                    best_prev_idx = -1
+
+                    # Find closest previous anchor
+                    for i, (t_id, px, py) in enumerate(active_traces):
+                        if i in matched_prev_indices:
+                            continue
+                        dist = math.hypot(x - px, y - py)
+                        if dist < min_dist and dist <= distance_threshold:
+                            min_dist = dist
+                            best_prev_idx = i
+
+                    if best_prev_idx != -1:
+                        # Match found - use the same trace_id
+                        trace_id = active_traces[best_prev_idx][0]
                         assignments[lbl_id] = trace_id
-                        matched_rows.add(r_i)
-                        matched_anchors.add(c_i)
-                        # Track the new location for that trace
+                        matched_prev_indices.add(best_prev_idx)
                         new_active.append((trace_id, x, y))
-
-                # Now, any anchor in this step that was not matched must be new
-                for c_i, (lbl_id, stv, x, y) in enumerate(anchor_list):
-                    if c_i not in matched_anchors:
+                    else:
+                        # No match found - create new trace_id
                         assignments[lbl_id] = next_trace_id
                         new_active.append((next_trace_id, x, y))
                         next_trace_id += 1
 
-                # active_traces for the next iteration
+                # Update active_traces for next iteration
                 active_traces = new_active
 
     # 3) Update the database
@@ -593,7 +573,7 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
 
     # Initialize ScaleStep
     base_scale = 10000
-    dataset_name = 'yan'
+    dataset_name = 'newyan'
     scale_step = ScaleStep(base_scale, dataset_name)
 
     # 1) Create label_anchors table
