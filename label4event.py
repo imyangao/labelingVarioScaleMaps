@@ -8,7 +8,6 @@ import os
 from shapely.geometry import Polygon
 from shapely.affinity import rotate
 from scalestep import ScaleStep
-from PIL import ImageFont, ImageDraw, Image
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from collections import defaultdict
@@ -403,7 +402,7 @@ def compute_3d_bounding_boxes(conn, create_table=True):
                    ST_Y(anchor_geom) as y,
                    step_value
             FROM label_anchors
-            WHERE label_trace_id IS NOT NULL AND fits is TRUE
+            WHERE label_trace_id IS NOT NULL
             ORDER BY label_trace_id;
         """)
         rows = cur.fetchall()
@@ -441,7 +440,6 @@ def compute_3d_bounding_boxes(conn, create_table=True):
                 """, (t_id, mnx, mxx, mny, mxy, mns, mxs))
         conn.commit()
 
-    # print("3D bounding boxes have been computed.")
     return bounding_boxes
 
 
@@ -487,81 +485,10 @@ def visualize_3d_bounding_boxes(bounding_boxes):
     plt.show()
 
 
-def commit_to_first_anchor_only(conn):
-    """Implements Method 1 (SQL post‑processing).
-
-    For every *label_trace_id* that ever goes `fits = FALSE`, force every later step to
-    be *FALSE* as well so that visibility becomes a monotone non‑increasing function of
-    *step_value*.
-    """
-    sql = """
-    WITH first_bad AS (
-        SELECT label_trace_id,
-               MIN(step_value) AS fail_at
-        FROM   label_anchors
-        WHERE  fits = FALSE
-        GROUP  BY label_trace_id
-    )
-    UPDATE label_anchors AS la
-    SET    fits = FALSE
-    FROM   first_bad AS fb
-    WHERE  la.label_trace_id = fb.label_trace_id
-       AND la.step_value    > fb.fail_at;
-    """
-    with conn.cursor() as cur:
-        cur.execute(sql)
-    conn.commit()
-    print("[post] commit_to_first_anchor_only() finished – monotone fits enforced.")
-
-
-# def propagate_anchors_topdown(conn):
-#     """Implements Method 2 (top‑down propagation) *purely in SQL*.
-#
-#     The idea is:
-#     * start from each trace's smallest *step_value* that still *fits*
-#     * let those anchors be the canonical representatives
-#     * delete any anchor at a **larger** step that has no earlier TRUE entry inside the
-#       same trace.
-#
-#     After this call, for any given *label_trace_id* the set of rows with `fits=TRUE`
-#     forms a chain S < T < …; no orphan TRUEs are left at coarser steps.
-#     """
-#     sql_drop_tmp = "DROP TABLE IF EXISTS tmp_first_good;"
-#     sql_first_good = """
-#         CREATE TEMP TABLE tmp_first_good AS
-#         SELECT   label_trace_id,
-#                  MIN(step_value) AS first_ok_step
-#         FROM     label_anchors
-#         WHERE    fits = TRUE
-#         GROUP BY label_trace_id;
-#     """
-#     sql_delete_orphans = """
-#         DELETE FROM label_anchors AS la
-#         USING  tmp_first_good AS fg
-#         WHERE  la.label_trace_id = fg.label_trace_id
-#           AND  la.step_value   > fg.first_ok_step
-#           AND  la.fits = TRUE   -- only delete the stray TRUEs
-#           AND NOT EXISTS (
-#                 SELECT 1
-#                 FROM   label_anchors AS earlier
-#                 WHERE  earlier.label_trace_id = la.label_trace_id
-#                   AND  earlier.step_value   < la.step_value
-#                   AND  earlier.fits = TRUE);
-#     """
-#     with conn.cursor() as cur:
-#         cur.execute(sql_drop_tmp)
-#         cur.execute(sql_first_good)
-#         cur.execute(sql_delete_orphans)
-#     conn.commit()
-#     print("[post] propagate_anchors_topdown() finished – subset relation enforced.")
-
-
 ##############################################################################
 # Main pipeline
 ##############################################################################
-# def main(do_simplify=False, simplify_tolerance=1.0, font_size=16):
-def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
-             enforce_first_fail=True):
+def main(do_simplify=False, simplify_tolerance=1.0):
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
@@ -588,17 +515,13 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
             name TEXT,
             anchor_geom geometry(POINT, 28992),
             face_geom    geometry(MULTIPOLYGON, 28992),
-            angle      DOUBLE PRECISION,
-            fits       BOOLEAN  -- Added column
+            angle      DOUBLE PRECISION
         );
         """)
 
     # 2) Get faces
     faces = get_faces_of_interest(conn)
     print(f"Found {len(faces)} faces of interest.")
-
-    font_path = "C:/Users/17731/Downloads/Roboto/static/Roboto_Condensed-Light.ttf"
-    font = ImageFont.truetype(font_path, font_size)
 
     # Dictionary to track previous anchors for each face
     # Format: {face_id: {step_value: [(point, angle), ...]}}
@@ -705,74 +628,18 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
             # Insert anchors
             for (anchor_pt, angle) in anchors:
                 wkt = anchor_pt.wkt
-                label_text = face_name or ""
-                if not label_text.strip():
-                    fits = False
-                else:
-                    # Calculate scale and resolution
-                    scale_denominator = scale_step.scale_for_step(S)
-                    resolution_mpp = ScaleStep.resolution_mpp(scale_denominator, ppi=96)
-
-                    # Calculate label dimensions in meters
-                    bbox = font.getbbox(label_text)
-                    width_px = bbox[2] - bbox[0]
-                    height_px = bbox[3] - bbox[1]
-                    label_width_m = width_px * resolution_mpp
-                    label_height_m = height_px * resolution_mpp
-
-                    # Create and rotate rectangle
-                    half_w = label_width_m / 2
-                    half_h = label_height_m / 2
-                    x, y = anchor_pt.x, anchor_pt.y
-                    rect = Polygon([
-                        (x - half_w, y - half_h),
-                        (x + half_w, y - half_h),
-                        (x + half_w, y + half_h),
-                        (x - half_w, y + half_h)
-                    ])
-                    rotated_rect = rotate(rect, angle, origin=anchor_pt)
-
-                    if poly_shp and rotated_rect.is_valid and rotated_rect.area > 0:
-                        intersection_area = rotated_rect.intersection(poly_shp).area
-                        overlap_ratio = intersection_area / rotated_rect.area
-                        fits = overlap_ratio >= 0.70  # threshold
-                    else:
-                        fits = False
-
                 # Insert into database
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO label_anchors(face_id, step_value, feature_class, name, anchor_geom, face_geom, angle, fits)
-                        VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 28992), ST_Multi(ST_GeomFromText(%s, 28992)), %s, %s)
-                    """, (face_id, S, fclass, face_name, wkt, poly_wkt, angle, fits))
-
-    # with conn.cursor() as cur:
-    #     cur.execute("""
-    #         WITH first_failure AS (
-    #             SELECT face_id, name, MIN(step_value) AS first_fail_step
-    #             FROM label_anchors
-    #             WHERE fits = False
-    #             GROUP BY face_id, name
-    #         )
-    #         UPDATE label_anchors la
-    #         SET fits = False
-    #         FROM first_failure ff
-    #         WHERE la.face_id = ff.face_id
-    #         AND la.name = ff.name
-    #         AND la.step_value >= ff.first_fail_step;
-    #     """)
+                        INSERT INTO label_anchors(face_id, step_value, feature_class, name, anchor_geom, face_geom, angle)
+                        VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 28992), ST_Multi(ST_GeomFromText(%s, 28992)), %s)
+                    """, (face_id, S, fclass, face_name, wkt, poly_wkt, angle))
 
     print("Done! Label anchors inserted.")
 
     # Done inserting; now assign label_trace_id
     assign_label_trace_ids(conn, distance_threshold=50.0)
     print("Done! label_trace_id assigned.")
-
-    if enforce_first_fail:
-        commit_to_first_anchor_only(conn)
-
-    # if propagate_topdown:
-    #     propagate_anchors_topdown(conn)
 
     # Compute 3D bounding boxes
     bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
@@ -784,7 +651,6 @@ def main(do_simplify=False, simplify_tolerance=1.0, font_size=16,
     conn.close()
 
 
-
 if __name__ == "__main__":
     # Example usage:
     #   1) with no simplification
@@ -792,6 +658,5 @@ if __name__ == "__main__":
     #   2) with simplification
     #       main(do_simplify=True, simplify_tolerance=5.0)
 
-    main(do_simplify=True, simplify_tolerance=1.0, font_size=16,
-         enforce_first_fail=False)
+    main(do_simplify=True, simplify_tolerance=1.0)
 
