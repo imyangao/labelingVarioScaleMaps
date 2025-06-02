@@ -215,13 +215,13 @@ def process_road_geometry(conn, step_value, polygon, feature_class, face_id, nam
         return None
 
     primary_paths = find_junction_to_junction_paths(G, junctions)
-    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
+    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=0.0)
 
     # LABELING: Take all lines above a fraction of the max length
     sorted_lines = sorted(merged_primary, key=lambda l: l.length, reverse=True)
     if len(sorted_lines) > 0:
         max_length = sorted_lines[0].length
-        threshold_fraction = 0.25  # label lines >= 25% of the longest line
+        threshold_fraction = 0.50  # label lines >= 25% of the longest line
         length_threshold = threshold_fraction * max_length
     else:
         length_threshold = 0.0
@@ -260,6 +260,7 @@ def process_water_geometry(conn, step_value, polygon, feature_class, face_id, na
 
     # Build raw skeleton
     raw_skel_lines = build_skeleton_lines(poly_for_skel)
+    # print(f"Built {len(raw_skel_lines)} raw skeleton lines for face {face_id}")
     if not raw_skel_lines:
         return None
 
@@ -270,21 +271,26 @@ def process_water_geometry(conn, step_value, polygon, feature_class, face_id, na
         return None
 
     primary_paths = find_junction_to_junction_paths(G, junctions)
-    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
+    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=0.0)
 
     # LABELING: multiple lines above length threshold
     sorted_lines = sorted(merged_primary, key=lambda l: l.length, reverse=True)
     if len(sorted_lines) > 0:
         max_length = sorted_lines[0].length
-        threshold_fraction = 0.25
+        threshold_fraction = 0.50
         length_threshold = threshold_fraction * max_length
+        # print(f"Max line length: {max_length:.2f}")
+        # print(f"Threshold (50%): {length_threshold:.2f}")
     else:
         length_threshold = 0.0
 
     anchors = []
     for line in sorted_lines:
-        if line.length < length_threshold:
-            break
+        # print(f"  Line length: {line.length:.2f}", end="")
+        # if line.length < length_threshold:
+        #     print(" → Skipped")
+        #     break
+        # print(" → Accepted")
 
         midpoint = line.interpolate(0.5, normalized=True)
         (x1, y1) = line.coords[0]
@@ -304,7 +310,15 @@ def process_water_geometry(conn, step_value, polygon, feature_class, face_id, na
 
 def process_building_geometry(conn, step_value, polygon, feature_class, face_id, name):
     """Process building geometry and return anchor points."""
-    center, radius = largest_inscribed_circle(polygon)
+    # center, radius = largest_inscribed_circle(polygon)
+    # Try centroid first
+    centroid = polygon.centroid
+    if polygon.contains(centroid):
+        center = centroid
+    else:
+        # Fallback to polylabel only if centroid is not inside
+        center = polylabel(polygon, tolerance=1.0)
+
     if center is not None:
         # Calculate rotation angle from minimum rotated rectangle
         rect = polygon.minimum_rotated_rectangle
@@ -508,109 +522,100 @@ def insert_labels_into_anchors_table(conn, step_value, gpkg_file):
 ################################################################################
 # Trace anchor points across slices
 ################################################################################
-def assign_label_trace_ids(conn, distance_threshold=50.0):
+def assign_label_trace_ids(conn, distance_per_step=float('inf')):
     """
-    Post-process the label_anchors table to group anchors from the same face
-    that persist across different steps into the same label_trace_id.
+    Assign label_trace_id to label anchors across steps per face using closest-point matching.
+    Allows greater spatial deviation for anchors with larger step gaps.
 
-    distance_threshold is how close two anchors must be (in map units)
-    to be considered the 'same' anchor in consecutive steps.
+    Parameters:
+    - distance_per_step: how many map units are allowed per step in time.
     """
-    from scipy.optimize import linear_sum_assignment
     import math
     from collections import defaultdict
+    from itertools import groupby
 
-    # 1) Add new column if it doesn't exist
+    # 1. Add column if not exists
     with conn.cursor() as cur:
         try:
-            cur.execute("ALTER TABLE label_anchors_from_slices ADD COLUMN label_trace_id BIGSERIAL;")
+            cur.execute("ALTER TABLE label_anchors ADD COLUMN label_trace_id BIGSERIAL;")
         except psycopg2.errors.DuplicateColumn:
             conn.rollback()
 
-    # 2) Fetch all anchors
+    # 2. Fetch all anchors
     with conn.cursor() as cur:
         cur.execute("""
             SELECT label_id, face_id, step_value,
                    ST_X(anchor_geom) AS x,
                    ST_Y(anchor_geom) AS y
-            FROM label_anchors_from_slices
+            FROM label_anchors
             ORDER BY face_id, step_value;
         """)
         rows = cur.fetchall()
 
-    # Group by face_id
+    # 3. Group by face_id
     faces_map = defaultdict(list)
     for (lbl_id, face_id, step_val, x, y) in rows:
         faces_map[face_id].append((lbl_id, step_val, x, y))
 
-    # We'll store label_id -> label_trace_id
     assignments = {}
     next_trace_id = 1
 
     for face_id, anchors in faces_map.items():
-        # Sort by ascending step_value
-        anchors.sort(key=lambda r: r[1])
+        anchors.sort(key=lambda r: r[1])  # sort by step_value
+        steps_data = [(step_val, list(grp)) for step_val, grp in groupby(anchors, key=lambda r: r[1])]
 
-        # Split by step_value
-        from itertools import groupby
-        steps_data = [(step_val, list(grp))
-                      for step_val, grp in groupby(anchors, key=lambda r: r[1])]
-
-        # This will hold (trace_id, x, y) for anchors from the *previous* step
-        active_traces = []
+        active_traces = []  # (trace_id, x, y)
+        prev_step_val = None
 
         for idx, (step_val, anchor_list) in enumerate(steps_data):
             if idx == 0:
-                # All anchors in the first step get new trace IDs
-                for (lbl_id, stv, x, y) in anchor_list:
+                for (lbl_id, _, x, y) in anchor_list:
                     assignments[lbl_id] = next_trace_id
                     active_traces.append((next_trace_id, x, y))
                     next_trace_id += 1
+                prev_step_val = step_val
             else:
-                # Since we know previous step has more or equal anchors,
-                # we can directly match current anchors to their closest previous anchors
+                step_gap = step_val - prev_step_val
+                max_dist = step_gap * distance_per_step
+
                 new_active = []
-                matched_prev_indices = set()
+                matched_prev = set()
 
-                # For each current anchor, find the closest previous anchor
-                for (lbl_id, stv, x, y) in anchor_list:
+                for (lbl_id, _, x, y) in anchor_list:
                     min_dist = float('inf')
-                    best_prev_idx = -1
+                    best_idx = -1
 
-                    # Find closest previous anchor
-                    for i, (t_id, px, py) in enumerate(active_traces):
-                        if i in matched_prev_indices:
+                    for i, (trace_id, px, py) in enumerate(active_traces):
+                        if i in matched_prev:
                             continue
                         dist = math.hypot(x - px, y - py)
-                        if dist < min_dist and dist <= distance_threshold:
+                        if dist < min_dist and dist <= max_dist:
                             min_dist = dist
-                            best_prev_idx = i
+                            best_idx = i
 
-                    if best_prev_idx != -1:
-                        # Match found - use the same trace_id
-                        trace_id = active_traces[best_prev_idx][0]
+                    if best_idx != -1:
+                        trace_id = active_traces[best_idx][0]
                         assignments[lbl_id] = trace_id
-                        matched_prev_indices.add(best_prev_idx)
+                        matched_prev.add(best_idx)
                         new_active.append((trace_id, x, y))
                     else:
-                        # No match found - create new trace_id
                         assignments[lbl_id] = next_trace_id
                         new_active.append((next_trace_id, x, y))
                         next_trace_id += 1
 
-                # Update active_traces for next iteration
                 active_traces = new_active
-    # 3) Update the database
+                prev_step_val = step_val
+
+    # 4. Write results to DB
     with conn.cursor() as cur:
         for lbl_id, trace_id in assignments.items():
             cur.execute("""
-                UPDATE label_anchors_from_slices
+                UPDATE label_anchors
                    SET label_trace_id = %s
                  WHERE label_id = %s;
             """, (trace_id, lbl_id))
-
     conn.commit()
-    print("label_trace_id assigned to all anchors.")
+    print("label_trace_id assigned using closest-point matching.")
 
 def compute_3d_bounding_boxes(conn, create_table=True):
     """
@@ -784,29 +789,29 @@ def main(use_intermediate_files=False):
 
             # Step C: Generate skeleton-labeled output
             skeleton_output_gpkg = f"gpkg/skeleton_output_{step_val}.gpkg"
-            generate_skeleton_labels(intermediate_gpkg, skeleton_output_gpkg, do_simplify=True, simplify_tolerance=1.0)
+            generate_skeleton_labels(intermediate_gpkg, skeleton_output_gpkg, do_simplify=False, simplify_tolerance=1.0)
 
             # Step D: Insert labels from skeleton output into label_anchors_from_slices
             insert_labels_into_anchors_table(conn, step_val, skeleton_output_gpkg)
         else:
             # Process geometries directly without intermediate files
-            process_geometries_directly(conn, step_val, do_simplify=True, simplify_tolerance=1.0)
+            process_geometries_directly(conn, step_val, do_simplify=False, simplify_tolerance=1.0)
 
     # ------------------
     # 4) Trace anchor points across slices
     # ------------------
     print("\n--- Tracing anchor points across slices ---")
-    assign_label_trace_ids(conn, distance_threshold=50.0)
+    assign_label_trace_ids(conn, distance_per_step=float('inf'))
     
     # ------------------
     # 5) Compute and visualize 3D bounding boxes
     # ------------------
-    print("\n--- Computing 3D bounding boxes ---")
-    bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
+    # print("\n--- Computing 3D bounding boxes ---")
+    # bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
 
-    # Visualize the bounding boxes
-    print("\n--- Visualizing 3D bounding boxes ---")
-    visualize_3d_bounding_boxes(bounding_boxes)
+    # # Visualize the bounding boxes
+    # print("\n--- Visualizing 3D bounding boxes ---")
+    # visualize_3d_bounding_boxes(bounding_boxes)
 
     print("All slices processed. Check label_anchors_from_slices for results.")
     conn.close()
