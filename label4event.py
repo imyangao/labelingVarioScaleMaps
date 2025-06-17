@@ -1,41 +1,11 @@
 import psycopg2
 import shapely.wkb
-from shapely.geometry import Point, LineString
-from shapely.algorithms.polylabel import polylabel
-import math
-import geopandas as gpd
-import os
-from shapely.geometry import Polygon
-from shapely.affinity import rotate
-from scalestep import ScaleStep
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from collections import defaultdict
 
-from genSkeleton import (
-    build_skeleton_lines,
-    lines_to_graph,
-    get_junction_nodes,
-    find_junction_to_junction_paths,
-    merge_collinear_lines,
-    largest_inscribed_circle,
-)
-
-##############################################################################
-# Database connection
-##############################################################################
-DB_NAME = "tgap_test"
-DB_USER = "postgres"
-DB_PASS = "Gy@001130"
-DB_HOST = "localhost"
-DB_PORT = 5432
-
-##############################################################################
-# Feature-class ranges
-##############################################################################
-ROAD_MIN, ROAD_MAX = 10000, 11000
-WATER_MIN, WATER_MAX = 12000, 13000
-BULD_MIN, BULD_MAX = 13000, 14000
+from scalestep import ScaleStep
+from labeling_core.db import get_connection, ROAD_MIN, ROAD_MAX, WATER_MIN, WATER_MAX, BULD_MIN, BULD_MAX
+from labeling_core.anchors import compute_skeleton_anchors, compute_building_anchor
+from labeling_core.traces import assign_label_trace_ids, compute_3d_bounding_boxes, visualize_3d_bounding_boxes
 
 ##############################################################################
 # 1) Retrieve faces of interest
@@ -156,345 +126,10 @@ def polygonize_in_postgis_and_get_polygon(conn, line_wkbs):
         return poly_shp
 
 ##############################################################################
-# 5) Angle
-##############################################################################
-def compute_line_angle(line):
-    coords = list(line.coords)
-    (x1, y1), (x2, y2) = coords[0], coords[-1]
-    dx, dy = (x2 - x1), (y2 - y1)
-    angle_deg = math.degrees(math.atan2(dy, dx))
-    if angle_deg > 90:
-        angle_deg -= 180
-    elif angle_deg < -90:
-        angle_deg += 180
-    return angle_deg
-
-##############################################################################
-# 6) Skeleton-based anchors
-##############################################################################
-def compute_skeleton_anchors(polygon, do_simplify=False, simplify_tolerance=1.0):
-    if do_simplify and simplify_tolerance > 0:
-        # preserve_topology=True helps avoid weird self-intersections
-        polygon = polygon.simplify(simplify_tolerance, preserve_topology=True)
-
-    raw_skel_lines = build_skeleton_lines(polygon)
-    if not raw_skel_lines:
-        return []
-
-    G = lines_to_graph(raw_skel_lines)
-    junctions = get_junction_nodes(G, min_degree=3)
-    threshold_fraction = 0.50
-    if len(junctions) < 2:
-        # fallback: just pick raw lines above threshold
-        sorted_raw = sorted(raw_skel_lines, key=lambda ln: ln.length, reverse=True)
-        if not sorted_raw:
-            return []
-        max_len = sorted_raw[0].length
-        length_threshold = threshold_fraction * max_len
-
-        out_anchors = []
-        for ln in sorted_raw:
-            if ln.length < length_threshold:
-                break
-            midpt = ln.interpolate(0.5, normalized=True)
-            angle = compute_line_angle(ln)
-            out_anchors.append((midpt, angle))
-        return out_anchors
-
-    # Real skeleton lines - using primary paths directly without merging
-    primary_paths = find_junction_to_junction_paths(G, junctions)
-    if not primary_paths:
-        return []
-
-    # Sort by length and filter by threshold
-    primary_paths.sort(key=lambda l: l.length, reverse=True)
-    max_length = primary_paths[0].length
-    length_threshold = threshold_fraction * max_length
-
-    anchors = []
-    for line in primary_paths:
-        if line.length < length_threshold:
-            break
-        midpoint = line.interpolate(0.5, normalized=True)
-        angle_deg = compute_line_angle(line)
-        anchors.append((midpoint, angle_deg))
-
-    return anchors
-
-##############################################################################
-# 7) Buildings: polylabel + orientation
-##############################################################################
-def compute_building_anchor(polygon):
-
-    from shapely.algorithms.polylabel import polylabel
-
-    if polygon.is_empty:
-        return None, 0.0
-
-    # anchor = polylabel(polygon, tolerance=1.0)
-
-    # Try centroid first
-    centroid = polygon.centroid
-    if polygon.contains(centroid):
-        anchor = centroid
-    else:
-        # Fallback to polylabel only if centroid is not inside
-        anchor = polylabel(polygon, tolerance=1.0)
-
-    minrect = polygon.minimum_rotated_rectangle
-    coords = list(minrect.exterior.coords)
-    if len(coords) < 2:
-        return anchor, 0.0
-
-    best_len = 0.0
-    best_angle = 0.0
-    for i in range(len(coords) - 1):
-        p1 = coords[i]
-        p2 = coords[i+1]
-        seg_len = Point(p1).distance(Point(p2))
-        if seg_len > best_len:
-            best_len = seg_len
-            dx = p2[0] - p1[0]
-            dy = p2[1] - p1[1]
-            angle_deg = math.degrees(math.atan2(dy, dx))
-            if angle_deg > 90:
-                angle_deg -= 180
-            elif angle_deg < -90:
-                angle_deg += 180
-            best_angle = angle_deg
-
-    return anchor, best_angle
-
-
-##############################################################################
-# Assign label_trace_id
-##############################################################################
-def assign_label_trace_ids(conn, distance_per_step=float('inf')):
-    """
-    Assign label_trace_id to label anchors across steps per face using closest-point matching.
-    Allows greater spatial deviation for anchors with larger step gaps.
-
-    Parameters:
-    - distance_per_step: how many map units are allowed per step in time.
-    """
-    import math
-    from collections import defaultdict
-    from itertools import groupby
-
-    # 1. Add column if not exists
-    with conn.cursor() as cur:
-        try:
-            cur.execute("ALTER TABLE label_anchors ADD COLUMN label_trace_id BIGSERIAL;")
-        except psycopg2.errors.DuplicateColumn:
-            conn.rollback()
-
-    # 2. Fetch all anchors
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT label_id, face_id, step_value,
-                   ST_X(anchor_geom) AS x,
-                   ST_Y(anchor_geom) AS y
-            FROM label_anchors
-            ORDER BY face_id, step_value;
-        """)
-        rows = cur.fetchall()
-
-    # 3. Group by face_id
-    faces_map = defaultdict(list)
-    for (lbl_id, face_id, step_val, x, y) in rows:
-        faces_map[face_id].append((lbl_id, step_val, x, y))
-
-    assignments = {}
-    next_trace_id = 1
-
-    for face_id, anchors in faces_map.items():
-        anchors.sort(key=lambda r: r[1])  # sort by step_value
-        steps_data = [(step_val, list(grp)) for step_val, grp in groupby(anchors, key=lambda r: r[1])]
-
-        active_traces = []  # (trace_id, x, y)
-        prev_step_val = None
-
-        for idx, (step_val, anchor_list) in enumerate(steps_data):
-            if idx == 0:
-                for (lbl_id, _, x, y) in anchor_list:
-                    assignments[lbl_id] = next_trace_id
-                    active_traces.append((next_trace_id, x, y))
-                    next_trace_id += 1
-                prev_step_val = step_val
-            else:
-                step_gap = step_val - prev_step_val
-                max_dist = step_gap * distance_per_step
-
-                new_active = []
-                matched_prev = set()
-
-                for (lbl_id, _, x, y) in anchor_list:
-                    min_dist = float('inf')
-                    best_idx = -1
-
-                    for i, (trace_id, px, py) in enumerate(active_traces):
-                        if i in matched_prev:
-                            continue
-                        dist = math.hypot(x - px, y - py)
-                        if dist < min_dist and dist <= max_dist:
-                            min_dist = dist
-                            best_idx = i
-
-                    if best_idx != -1:
-                        trace_id = active_traces[best_idx][0]
-                        assignments[lbl_id] = trace_id
-                        matched_prev.add(best_idx)
-                        new_active.append((trace_id, x, y))
-                    else:
-                        assignments[lbl_id] = next_trace_id
-                        new_active.append((next_trace_id, x, y))
-                        next_trace_id += 1
-
-                active_traces = new_active
-                prev_step_val = step_val
-
-    # 4. Write results to DB
-    with conn.cursor() as cur:
-        for lbl_id, trace_id in assignments.items():
-            cur.execute("""
-                UPDATE label_anchors
-                   SET label_trace_id = %s
-                 WHERE label_id = %s;
-            """, (trace_id, lbl_id))
-    conn.commit()
-    print("label_trace_id assigned using closest-point matching with adaptive step-based threshold.")
-
-
-##############################################################################
-# Compute 3D bounding boxes
-##############################################################################
-def compute_3d_bounding_boxes(conn, create_table=True):
-    """
-    For each label_trace_id, compute an axis-aligned bounding box in x, y,
-    and step_value space. Then optionally store them in a new table for
-    further use or visualization.
-    """
-    if create_table:
-        with conn.cursor() as cur:
-            # Drop if exists for demonstration; remove in real environment
-            cur.execute("DROP TABLE IF EXISTS label_trace_3d_bounds;")
-            # We will store minX, maxX, minY, maxY, minStep, maxStep
-            cur.execute("""
-                CREATE TABLE label_trace_3d_bounds (
-                    label_trace_id BIGINT,
-                    min_x DOUBLE PRECISION,
-                    max_x DOUBLE PRECISION,
-                    min_y DOUBLE PRECISION,
-                    max_y DOUBLE PRECISION,
-                    min_step INTEGER,
-                    max_step INTEGER
-                );
-            """)
-        conn.commit()
-
-    # Fetch anchors grouped by label_trace_id
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT label_trace_id,
-                   ST_X(anchor_geom) as x,
-                   ST_Y(anchor_geom) as y,
-                   step_value
-            FROM label_anchors
-            WHERE label_trace_id IS NOT NULL
-            ORDER BY label_trace_id;
-        """)
-        rows = cur.fetchall()
-
-    # Dictionary: trace_id -> list of (x, y, step)
-    trace_map = defaultdict(list)
-    for t_id, x, y, stp in rows:
-        trace_map[t_id].append((x, y, stp))
-
-    # Compute bounding boxes
-    bounding_boxes = {}
-    for t_id, coords in trace_map.items():
-        xs = [c[0] for c in coords]
-        ys = [c[1] for c in coords]
-        steps = [c[2] for c in coords]
-        min_x = min(xs)
-        max_x = max(xs)
-        min_y = min(ys)
-        max_y = max(ys)
-        min_stp = min(steps)
-        max_stp = max(steps)
-        bounding_boxes[t_id] = (min_x, max_x, min_y, max_y, min_stp, max_stp)
-
-    # Insert bounding boxes into table
-    if create_table:
-        with conn.cursor() as cur:
-            for t_id, (mnx, mxx, mny, mxy, mns, mxs) in bounding_boxes.items():
-                cur.execute("""
-                    INSERT INTO label_trace_3d_bounds (
-                        label_trace_id,
-                        min_x, max_x, min_y, max_y,
-                        min_step, max_step
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s);
-                """, (t_id, mnx, mxx, mny, mxy, mns, mxs))
-        conn.commit()
-
-    return bounding_boxes
-
-
-##############################################################################
-# Simple 3D visualization for bounding boxes
-##############################################################################
-def visualize_3d_bounding_boxes(bounding_boxes):
-    """
-    Create a very simple 3D plot of each axis-aligned bounding box using Matplotlib.
-    """
-    fig = plt.figure()
-    ax = fig.add_subplot(projection='3d')
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Step')
-
-    for t_id, (min_x, max_x, min_y, max_y, min_step, max_step) in bounding_boxes.items():
-        # "Corners" of the 3D box
-        corners = [
-            (min_x, min_y, min_step),
-            (min_x, min_y, max_step),
-            (min_x, max_y, min_step),
-            (min_x, max_y, max_step),
-            (max_x, min_y, min_step),
-            (max_x, min_y, max_step),
-            (max_x, max_y, min_step),
-            (max_x, max_y, max_step),
-        ]
-        # We'll draw line segments between these corners
-        # For an axis-aligned box, we have 12 edges:
-        edges = [
-            (0,1), (0,2), (0,4), (7,3), (7,5), (7,6), (1,3), (1,5), (2,3), (2,6), (4,5), (4,6)
-        ]
-        for (i, j) in edges:
-            p1 = corners[i]
-            p2 = corners[j]
-            xs = [p1[0], p2[0]]
-            ys = [p1[1], p2[1]]
-            zs = [p1[2], p2[2]]
-            ax.plot(xs, ys, zs)
-
-    plt.title("3D Bounding Boxes by label_trace_id")
-    plt.show()
-
-
-##############################################################################
 # Main pipeline
 ##############################################################################
 def main(do_simplify=False, simplify_tolerance=1.0):
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    conn.autocommit = True
+    conn = get_connection()
 
     # Initialize ScaleStep
     base_scale = 10000
@@ -578,13 +213,13 @@ def main(do_simplify=False, simplify_tolerance=1.0):
                     anchors = [(c, 0.0)]
             elif BULD_MIN <= fclass < BULD_MAX:
                 # building => polylabel approach
-                a_pt, a_angle = compute_building_anchor(
+                anchors = compute_building_anchor(
                     polygon=poly_shp
                 )
-                if a_pt is None:
+                if not anchors:
                     a_pt = poly_shp.centroid
                     a_angle = 0.0
-                anchors = [(a_pt, a_angle)]
+                    anchors = [(a_pt, a_angle)]
             else:
                 # fallback => centroid
                 c = poly_shp.centroid
@@ -636,13 +271,13 @@ def main(do_simplify=False, simplify_tolerance=1.0):
     print("Done! Label anchors inserted.")
 
     # Done inserting; now assign label_trace_id
-    # assign_label_trace_ids(conn, distance_threshold=10.0)
-    assign_label_trace_ids(conn, distance_per_step=float('inf'))
+    assign_label_trace_ids(conn, table_name='label_anchors', distance_per_step=float('inf'))
     print("Done! label_trace_id assigned.")
 
-    # # Compute 3D bounding boxes
-    # bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
-    # print("Done! 3D bounding boxes computed.")
+    # # Compute 3D bounding boxes and visualize
+    # bounds_table_name = 'label_trace_3d_bounds'
+    # bounding_boxes = compute_3d_bounding_boxes(conn, 'label_anchors', bounds_table_name, create_table=True)
+    # print(f"Done! 3D bounding boxes computed and stored in {bounds_table_name}.")
     #
     # # Visualize them in 3D
     # visualize_3d_bounding_boxes(bounding_boxes)
@@ -651,11 +286,5 @@ def main(do_simplify=False, simplify_tolerance=1.0):
 
 
 if __name__ == "__main__":
-    # Example usage:
-    #   1) with no simplification
-    #       main(do_simplify=False)
-    #   2) with simplification
-    #       main(do_simplify=True, simplify_tolerance=5.0)
-
     main(do_simplify=False, simplify_tolerance=0.0)
 
