@@ -11,10 +11,6 @@ from labeling_core.anchors import compute_skeleton_anchors, compute_building_anc
 from labeling_core.traces import assign_label_trace_ids, compute_3d_bounding_boxes, visualize_3d_bounding_boxes
 
 
-################################################################################
-# Database & table setup
-################################################################################
-
 def create_or_reset_anchors_table(conn):
     """
     Create (or reset) a single table named label_anchors_from_slices,
@@ -85,14 +81,11 @@ def process_geometries_directly(conn, step_value, do_simplify=False, simplify_to
             feature_class_val = row.get('feature_class', None)
             face_id_val = row.get('face_id', None)
 
-            # Use pandas isna to check for both None and NaN which can't be converted to int.
             if gpd.pd.isna(feature_class_val) or gpd.pd.isna(face_id_val):
                 if gpd.pd.isna(face_id_val):
                     print(f"Warning: Skipping geometry at index {idx} due to missing face_id.")
-                # We can silently skip if feature_class is missing, as it's not a critical error.
                 continue
-            
-            # It is now safe to cast to int
+
             polygon = row['polygon_geom'].buffer(0)
             feature_class = int(feature_class_val)
             face_id = int(face_id_val)
@@ -262,7 +255,7 @@ def insert_labels_into_anchors_table(conn, step_value, gpkg_file):
 
 
 ################################################################################
-# Main flow
+# Main pipeline
 ################################################################################
 def main(use_intermediate_files=False):
     conn = get_connection()
