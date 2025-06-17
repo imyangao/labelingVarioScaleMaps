@@ -23,7 +23,7 @@ sql = """
         ST_AsGeoJSON(la.anchor_geom)::json AS anchor_geom,
         la.angle,
         la.label_trace_id
-    FROM        label_anchors_from_slices  la
+    FROM        label_anchors  la
     JOIN        yan_tgap_face  f  ON f.face_id = la.face_id
     WHERE la.name is not null
     ORDER BY    la.label_id;
@@ -35,7 +35,7 @@ with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
 
 # -- 3. write rows to a prettified JSON file -----------------------------------
 #     Each element in rows is already a dict {col: value, …}
-out_file = "label_anchors.json"
+out_file = "label_anchors_event.json"
 with open(out_file, "w", encoding="utf‑8") as f:
     json.dump(rows, f, ensure_ascii=False, indent=2)
 
