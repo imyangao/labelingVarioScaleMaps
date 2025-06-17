@@ -183,13 +183,13 @@ def compute_skeleton_anchors(polygon, do_simplify=False, simplify_tolerance=1.0)
 
     G = lines_to_graph(raw_skel_lines)
     junctions = get_junction_nodes(G, min_degree=3)
+    threshold_fraction = 0.50
     if len(junctions) < 2:
         # fallback: just pick raw lines above threshold
         sorted_raw = sorted(raw_skel_lines, key=lambda ln: ln.length, reverse=True)
         if not sorted_raw:
             return []
         max_len = sorted_raw[0].length
-        threshold_fraction = 0.25
         length_threshold = threshold_fraction * max_len
 
         out_anchors = []
@@ -201,18 +201,18 @@ def compute_skeleton_anchors(polygon, do_simplify=False, simplify_tolerance=1.0)
             out_anchors.append((midpt, angle))
         return out_anchors
 
-    # Real skeleton lines
+    # Real skeleton lines - using primary paths directly without merging
     primary_paths = find_junction_to_junction_paths(G, junctions)
-    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
-    if not merged_primary:
+    if not primary_paths:
         return []
 
-    merged_primary.sort(key=lambda l: l.length, reverse=True)
-    max_length = merged_primary[0].length
-    length_threshold = 0.25 * max_length
+    # Sort by length and filter by threshold
+    primary_paths.sort(key=lambda l: l.length, reverse=True)
+    max_length = primary_paths[0].length
+    length_threshold = threshold_fraction * max_length
 
     anchors = []
-    for line in merged_primary:
+    for line in primary_paths:
         if line.length < length_threshold:
             break
         midpoint = line.interpolate(0.5, normalized=True)
@@ -231,7 +231,15 @@ def compute_building_anchor(polygon):
     if polygon.is_empty:
         return None, 0.0
 
-    anchor = polylabel(polygon, tolerance=1.0)
+    # anchor = polylabel(polygon, tolerance=1.0)
+
+    # Try centroid first
+    centroid = polygon.centroid
+    if polygon.contains(centroid):
+        anchor = centroid
+    else:
+        # Fallback to polylabel only if centroid is not inside
+        anchor = polylabel(polygon, tolerance=1.0)
 
     minrect = polygon.minimum_rotated_rectangle
     coords = list(minrect.exterior.coords)
@@ -261,26 +269,26 @@ def compute_building_anchor(polygon):
 ##############################################################################
 # Assign label_trace_id
 ##############################################################################
-def assign_label_trace_ids(conn, distance_threshold=50.0):
+def assign_label_trace_ids(conn, distance_per_step=float('inf')):
     """
-    Post-process the label_anchors table to group anchors from the same face
-    that persist across different steps into the same label_trace_id.
+    Assign label_trace_id to label anchors across steps per face using closest-point matching.
+    Allows greater spatial deviation for anchors with larger step gaps.
 
-    distance_threshold is how close two anchors must be (in map units)
-    to be considered the 'same' anchor in consecutive steps.
+    Parameters:
+    - distance_per_step: how many map units are allowed per step in time.
     """
-    from scipy.optimize import linear_sum_assignment
     import math
     from collections import defaultdict
+    from itertools import groupby
 
-    # 1) Add new column if it doesn't exist
+    # 1. Add column if not exists
     with conn.cursor() as cur:
         try:
             cur.execute("ALTER TABLE label_anchors ADD COLUMN label_trace_id BIGSERIAL;")
         except psycopg2.errors.DuplicateColumn:
             conn.rollback()
 
-    # 2) Fetch all anchors
+    # 2. Fetch all anchors
     with conn.cursor() as cur:
         cur.execute("""
             SELECT label_id, face_id, step_value,
@@ -291,70 +299,61 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
         """)
         rows = cur.fetchall()
 
-    # Group by face_id
+    # 3. Group by face_id
     faces_map = defaultdict(list)
     for (lbl_id, face_id, step_val, x, y) in rows:
         faces_map[face_id].append((lbl_id, step_val, x, y))
 
-    # We'll store label_id -> label_trace_id
     assignments = {}
     next_trace_id = 1
 
     for face_id, anchors in faces_map.items():
-        # Sort by ascending step_value
-        anchors.sort(key=lambda r: r[1])
+        anchors.sort(key=lambda r: r[1])  # sort by step_value
+        steps_data = [(step_val, list(grp)) for step_val, grp in groupby(anchors, key=lambda r: r[1])]
 
-        # Split by step_value
-        from itertools import groupby
-        steps_data = [(step_val, list(grp))
-                      for step_val, grp in groupby(anchors, key=lambda r: r[1])]
-
-        # This will hold (trace_id, x, y) for anchors from the *previous* step
-        active_traces = []
+        active_traces = []  # (trace_id, x, y)
+        prev_step_val = None
 
         for idx, (step_val, anchor_list) in enumerate(steps_data):
             if idx == 0:
-                # All anchors in the first step get new trace IDs
-                for (lbl_id, stv, x, y) in anchor_list:
+                for (lbl_id, _, x, y) in anchor_list:
                     assignments[lbl_id] = next_trace_id
                     active_traces.append((next_trace_id, x, y))
                     next_trace_id += 1
+                prev_step_val = step_val
             else:
-                # Since we know previous step has more or equal anchors,
-                # we can directly match current anchors to their closest previous anchors
+                step_gap = step_val - prev_step_val
+                max_dist = step_gap * distance_per_step
+
                 new_active = []
-                matched_prev_indices = set()
+                matched_prev = set()
 
-                # For each current anchor, find the closest previous anchor
-                for (lbl_id, stv, x, y) in anchor_list:
+                for (lbl_id, _, x, y) in anchor_list:
                     min_dist = float('inf')
-                    best_prev_idx = -1
+                    best_idx = -1
 
-                    # Find closest previous anchor
-                    for i, (t_id, px, py) in enumerate(active_traces):
-                        if i in matched_prev_indices:
+                    for i, (trace_id, px, py) in enumerate(active_traces):
+                        if i in matched_prev:
                             continue
                         dist = math.hypot(x - px, y - py)
-                        if dist < min_dist and dist <= distance_threshold:
+                        if dist < min_dist and dist <= max_dist:
                             min_dist = dist
-                            best_prev_idx = i
+                            best_idx = i
 
-                    if best_prev_idx != -1:
-                        # Match found - use the same trace_id
-                        trace_id = active_traces[best_prev_idx][0]
+                    if best_idx != -1:
+                        trace_id = active_traces[best_idx][0]
                         assignments[lbl_id] = trace_id
-                        matched_prev_indices.add(best_prev_idx)
+                        matched_prev.add(best_idx)
                         new_active.append((trace_id, x, y))
                     else:
-                        # No match found - create new trace_id
                         assignments[lbl_id] = next_trace_id
                         new_active.append((next_trace_id, x, y))
                         next_trace_id += 1
 
-                # Update active_traces for next iteration
                 active_traces = new_active
+                prev_step_val = step_val
 
-    # 3) Update the database
+    # 4. Write results to DB
     with conn.cursor() as cur:
         for lbl_id, trace_id in assignments.items():
             cur.execute("""
@@ -362,9 +361,8 @@ def assign_label_trace_ids(conn, distance_threshold=50.0):
                    SET label_trace_id = %s
                  WHERE label_id = %s;
             """, (trace_id, lbl_id))
-
     conn.commit()
-    print("label_trace_id assigned to all anchors.")
+    print("label_trace_id assigned using closest-point matching with adaptive step-based threshold.")
 
 
 ##############################################################################
@@ -638,15 +636,16 @@ def main(do_simplify=False, simplify_tolerance=1.0):
     print("Done! Label anchors inserted.")
 
     # Done inserting; now assign label_trace_id
-    assign_label_trace_ids(conn, distance_threshold=50.0)
+    # assign_label_trace_ids(conn, distance_threshold=10.0)
+    assign_label_trace_ids(conn, distance_per_step=float('inf'))
     print("Done! label_trace_id assigned.")
 
-    # Compute 3D bounding boxes
-    bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
-    print("Done! 3D bounding boxes computed.")
-
-    # Visualize them in 3D
-    visualize_3d_bounding_boxes(bounding_boxes)
+    # # Compute 3D bounding boxes
+    # bounding_boxes = compute_3d_bounding_boxes(conn, create_table=True)
+    # print("Done! 3D bounding boxes computed.")
+    #
+    # # Visualize them in 3D
+    # visualize_3d_bounding_boxes(bounding_boxes)
 
     conn.close()
 
@@ -658,5 +657,5 @@ if __name__ == "__main__":
     #   2) with simplification
     #       main(do_simplify=True, simplify_tolerance=5.0)
 
-    main(do_simplify=True, simplify_tolerance=1.0)
+    main(do_simplify=False, simplify_tolerance=0.0)
 
