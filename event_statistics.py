@@ -6,9 +6,9 @@ import matplotlib.pyplot as plt
 db_config = {
     'host': 'localhost',
     'port': 5432,
-    'dbname': 'tgap_test',
-    'user': 'postgres',
-    'password': 'Gy@001130'
+    'dbname': '',
+    'user': '',
+    'password': ''
 }
 
 # SQL query
