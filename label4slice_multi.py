@@ -62,7 +62,7 @@ def create_or_reset_anchors_table(conn):
 ################################################################################
 # Process geometries directly without intermediate files
 ################################################################################
-def process_geometries_directly(conn, step_value, do_simplify=True, simplify_tolerance=10.0):
+def process_geometries_directly(conn, step_value, do_simplify=False, simplify_tolerance=10.0):
     """
     Process geometries directly from the database for a given step_value,
     compute anchor points based on feature_class, and insert them into the anchors table.
@@ -194,7 +194,7 @@ def process_geometries_directly(conn, step_value, do_simplify=True, simplify_tol
 
 
 def process_road_geometry(conn, step_value, polygon, feature_class, face_id, name, 
-                         do_simplify, simplify_tolerance):
+                         do_simplify=False, simplify_tolerance=0.0):
     """Process road geometry and return anchor points."""
     # Optional polygon simplification
     if do_simplify and simplify_tolerance > 0:
@@ -215,14 +215,15 @@ def process_road_geometry(conn, step_value, polygon, feature_class, face_id, nam
         return None
 
     primary_paths = find_junction_to_junction_paths(G, junctions)
-    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=0.0)
+    # Using primary_paths directly without merging collinear lines
 
     # LABELING: Take all lines above a fraction of the max length
-    sorted_lines = sorted(merged_primary, key=lambda l: l.length, reverse=True)
+    sorted_lines = sorted(primary_paths, key=lambda l: l.length, reverse=True)
     if len(sorted_lines) > 0:
         max_length = sorted_lines[0].length
         threshold_fraction = 0.50  # label lines >= 25% of the longest line
         length_threshold = threshold_fraction * max_length
+        print(f"  Max length: {max_length:.2f}, threshold: {length_threshold:.2f}")
     else:
         length_threshold = 0.0
 
@@ -250,7 +251,7 @@ def process_road_geometry(conn, step_value, polygon, feature_class, face_id, nam
 
 
 def process_water_geometry(conn, step_value, polygon, feature_class, face_id, name, 
-                          do_simplify, simplify_tolerance):
+                          do_simplify=False, simplify_tolerance=0.0):
     """Process water geometry and return anchor points."""
     # Optional polygon simplification
     if do_simplify and simplify_tolerance > 0:
@@ -271,14 +272,15 @@ def process_water_geometry(conn, step_value, polygon, feature_class, face_id, na
         return None
 
     primary_paths = find_junction_to_junction_paths(G, junctions)
-    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=0.0)
+    # Using primary_paths directly without merging collinear lines
 
     # LABELING: multiple lines above length threshold
-    sorted_lines = sorted(merged_primary, key=lambda l: l.length, reverse=True)
+    sorted_lines = sorted(primary_paths, key=lambda l: l.length, reverse=True)
     if len(sorted_lines) > 0:
         max_length = sorted_lines[0].length
         threshold_fraction = 0.50
         length_threshold = threshold_fraction * max_length
+        print(f"  Max length: {max_length:.2f}, threshold: {length_threshold:.2f}")
         # print(f"Max line length: {max_length:.2f}")
         # print(f"Threshold (50%): {length_threshold:.2f}")
     else:
@@ -286,6 +288,8 @@ def process_water_geometry(conn, step_value, polygon, feature_class, face_id, na
 
     anchors = []
     for line in sorted_lines:
+        if line.length < length_threshold:
+            break  # lines are sorted desc, so break as soon as below threshold
         # print(f"  Line length: {line.length:.2f}", end="")
         # if line.length < length_threshold:
         #     print(" → Skipped")
@@ -400,7 +404,7 @@ def export_slice_to_gpkg(conn, step_value, out_gpkg):
     print(f"Exported slice for step={step_value} to {out_gpkg}, layer=map_slice")
 
 
-def generate_skeleton_labels(intermediate_gpkg, output_gpkg, do_simplify=True, simplify_tolerance=10.0):
+def generate_skeleton_labels(intermediate_gpkg, output_gpkg, do_simplify=False, simplify_tolerance=10.0):
     """
     Calls the genSkeleton's `generate_skeleton_for_gpkg()` function to do
     all skeleton-based logic and write labeled layers into output_gpkg.
@@ -537,7 +541,7 @@ def assign_label_trace_ids(conn, distance_per_step=float('inf')):
     # 1. Add column if not exists
     with conn.cursor() as cur:
         try:
-            cur.execute("ALTER TABLE label_anchors ADD COLUMN label_trace_id BIGSERIAL;")
+            cur.execute("ALTER TABLE label_anchors_from_slices ADD COLUMN label_trace_id BIGSERIAL;")
         except psycopg2.errors.DuplicateColumn:
             conn.rollback()
 
@@ -547,7 +551,7 @@ def assign_label_trace_ids(conn, distance_per_step=float('inf')):
             SELECT label_id, face_id, step_value,
                    ST_X(anchor_geom) AS x,
                    ST_Y(anchor_geom) AS y
-            FROM label_anchors
+            FROM label_anchors_from_slices
             ORDER BY face_id, step_value;
         """)
         rows = cur.fetchall()
@@ -610,7 +614,7 @@ def assign_label_trace_ids(conn, distance_per_step=float('inf')):
     with conn.cursor() as cur:
         for lbl_id, trace_id in assignments.items():
             cur.execute("""
-                UPDATE label_anchors
+                UPDATE label_anchors_from_slices
                    SET label_trace_id = %s
                  WHERE label_id = %s;
             """, (trace_id, lbl_id))
@@ -789,13 +793,13 @@ def main(use_intermediate_files=False):
 
             # Step C: Generate skeleton-labeled output
             skeleton_output_gpkg = f"gpkg/skeleton_output_{step_val}.gpkg"
-            generate_skeleton_labels(intermediate_gpkg, skeleton_output_gpkg, do_simplify=False, simplify_tolerance=1.0)
+            generate_skeleton_labels(intermediate_gpkg, skeleton_output_gpkg, do_simplify=False, simplify_tolerance=0.0)
 
             # Step D: Insert labels from skeleton output into label_anchors_from_slices
             insert_labels_into_anchors_table(conn, step_val, skeleton_output_gpkg)
         else:
             # Process geometries directly without intermediate files
-            process_geometries_directly(conn, step_val, do_simplify=False, simplify_tolerance=1.0)
+            process_geometries_directly(conn, step_val, do_simplify=False, simplify_tolerance=0.0)
 
     # ------------------
     # 4) Trace anchor points across slices
@@ -820,4 +824,4 @@ def main(use_intermediate_files=False):
 if __name__ == "__main__":
     # Set use_intermediate_files=True if you want to use the original approach with intermediate files
     # Set use_intermediate_files=False to process geometries directly
-    main(use_intermediate_files=False)
+    main(use_intermediate_files=True)
