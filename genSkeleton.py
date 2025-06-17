@@ -16,9 +16,17 @@ def largest_inscribed_circle(polygon):
         return None, None
 
     try:
-        center_geom = polylabel(polygon, tolerance=1.0)
-        radius = polygon.boundary.distance(center_geom)
-        return center_geom, radius
+        # Try centroid first
+        centroid = polygon.centroid
+        if polygon.contains(centroid):
+            center = centroid
+            center = centroid
+        else:
+            # Fallback to polylabel only if centroid is not inside
+            center = polylabel(polygon, tolerance=1.0)
+        
+        radius = polygon.boundary.distance(center)
+        return center, radius
     except Exception as e:
         print("Polylabel failed:", e)
         return None, None
@@ -294,12 +302,8 @@ def generate_skeleton_for_gpkg(
         # Keep only valid polygons and explode MultiPolygons
         gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
         gdf = gdf[gdf.geometry.is_valid]
-        # gdf = gdf.explode(ignore_index=False).reset_index(names=['feature_class', 'face_id'])
         gdf = gdf.explode(index_parts=True)
         gdf = gdf.reset_index(drop=True)
-
-        # # debug
-        # print(gdf.geometry.type.value_counts())
 
         if gdf.empty:
             print(f"Skipping layer {layer}, no valid polygons found.")
@@ -352,18 +356,18 @@ def generate_skeleton_for_gpkg(
                         continue
 
                     primary_paths = find_junction_to_junction_paths(G, junctions)
-                    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
+                    # Using primary_paths directly without merging collinear lines
 
-                    # Store merged skeleton lines
-                    for ln in merged_primary:
+                    # Store primary skeleton lines
+                    for ln in primary_paths:
                         if ln.length > 0:
                             layer_roads_mainskel.append({"geometry": ln, "poly_id": idx})
 
                     # LABELING: Take all lines above a fraction of the max length
-                    sorted_lines = sorted(merged_primary, key=lambda l: l.length, reverse=True)
+                    sorted_lines = sorted(primary_paths, key=lambda l: l.length, reverse=True)
                     if len(sorted_lines) > 0:
                         max_length = sorted_lines[0].length
-                        threshold_fraction = 0.25  # label lines >= 25% of the longest line
+                        threshold_fraction = 0.50  # label lines >= 25% of the longest line
                         length_threshold = threshold_fraction * max_length
                     else:
                         length_threshold = 0.0
@@ -417,18 +421,18 @@ def generate_skeleton_for_gpkg(
                         continue
 
                     primary_paths = find_junction_to_junction_paths(G, junctions)
-                    merged_primary = merge_collinear_lines(primary_paths, angle_threshold=5.0)
+                    # Using primary_paths directly without merging collinear lines
 
-                    # Store merged skeleton lines
-                    for ln in merged_primary:
+                    # Store primary skeleton lines
+                    for ln in primary_paths:
                         if ln.length > 0:
                             layer_water_mainskel.append({"geometry": ln, "poly_id": idx})
 
                     # LABELING: multiple lines above length threshold
-                    sorted_lines = sorted(merged_primary, key=lambda l: l.length, reverse=True)
+                    sorted_lines = sorted(primary_paths, key=lambda l: l.length, reverse=True)
                     if len(sorted_lines) > 0:
                         max_length = sorted_lines[0].length
-                        threshold_fraction = 0.25
+                        threshold_fraction = 0.50
                         length_threshold = threshold_fraction * max_length
                     else:
                         length_threshold = 0.0
@@ -475,7 +479,6 @@ def generate_skeleton_for_gpkg(
                                 dx = p2[0] - p1[0]
                                 dy = p2[1] - p1[1]
                                 angle_rad = math.atan2(dy, dx)
-                                # best_angle = math.minimum_rotated_rectangledegrees(angle_rad)
                                 best_angle = math.degrees(angle_rad)
                         # Adjust angle to be within -90 to 90 degrees
                         if best_angle > 90:
@@ -544,6 +547,6 @@ if __name__ == "__main__":
     generate_skeleton_for_gpkg(
         input_gpkg,
         output_gpkg,
-        do_simplify=True,  # enable polygon simplification
-        simplify_tolerance=10.0  # set a tolerance
+        do_simplify=False,  # enable polygon simplification
+        simplify_tolerance=0.0  # set a tolerance
     )
