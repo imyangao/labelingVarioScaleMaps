@@ -2,16 +2,16 @@ import json
 import psycopg2
 from psycopg2.extras import RealDictCursor   # returns each row as a Python dict
 
-# -- 1. database connection ----------------------------------------------------
+
 conn = psycopg2.connect(
-    dbname="tgap_test",
-    user="postgres",
-    password="Gy@001130",
+    dbname="",
+    user="",
+    password="",
     host="localhost",
     port=5432
 )
 
-# -- 2. pull every record, turning geometries into GeoJSON text ----------------
+# pull every record, turning geometries into GeoJSON text
 sql = """
     SELECT
         la.label_id,
@@ -33,8 +33,8 @@ with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
     cur.execute(sql)
     rows = cur.fetchall()
 
-# -- 3. write rows to a prettified JSON file -----------------------------------
-#     Each element in rows is already a dict {col: value, …}
+# write rows to a JSON file
+# Each element in rows is already a dict {col: value, …}
 out_file = "label_anchors_event.json"
 with open(out_file, "w", encoding="utf‑8") as f:
     json.dump(rows, f, ensure_ascii=False, indent=2)
