@@ -8,7 +8,7 @@ from labeling_core.anchors import compute_skeleton_anchors, compute_building_anc
 from labeling_core.traces import assign_label_trace_ids, compute_3d_bounding_boxes, visualize_3d_bounding_boxes
 
 ##############################################################################
-# 1) Retrieve faces of interest
+# Retrieve faces of interest
 ##############################################################################
 def get_faces_of_interest(conn):
     sql = f"""
@@ -33,7 +33,7 @@ def get_faces_of_interest(conn):
     return rows
 
 ##############################################################################
-# 2) Retrieve edges bounding a given face
+# Retrieve edges bounding a given face
 ##############################################################################
 def get_edges_for_face(conn, face_id, face_step_low, face_step_high):
     sql = """
@@ -71,7 +71,7 @@ def get_edges_for_face(conn, face_id, face_step_low, face_step_high):
     return rows
 
 ##############################################################################
-# 3) Sub-interval logic
+# Sub-interval logic
 ##############################################################################
 def intervals_where_edge_bounds_face_noSwitch(face_id, f_low, f_high, edge_record):
     (edge_id,
@@ -91,7 +91,7 @@ def intervals_where_edge_bounds_face_noSwitch(face_id, f_low, f_high, edge_recor
         yield (overall_start, overall_end, geom_wkb)
 
 ##############################################################################
-# 4) Polygonize lines
+# Polygonize lines
 ##############################################################################
 def polygonize_in_postgis_and_get_polygon(conn, line_wkbs):
     if not line_wkbs:
@@ -131,12 +131,12 @@ def polygonize_in_postgis_and_get_polygon(conn, line_wkbs):
 def main(do_simplify=False, simplify_tolerance=1.0):
     conn = get_connection()
 
-    # Initialize ScaleStep
-    base_scale = 10000
-    dataset_name = 'newyan'
-    scale_step = ScaleStep(base_scale, dataset_name)
+    # # Initialize ScaleStep
+    # base_scale = 10000
+    # dataset_name = 'newyan'
+    # scale_step = ScaleStep(base_scale, dataset_name)
 
-    # 1) Create label_anchors table
+    # Create label_anchors table
     with conn.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS label_anchors CASCADE;")
         cur.execute("""
@@ -152,7 +152,7 @@ def main(do_simplify=False, simplify_tolerance=1.0):
         );
         """)
 
-    # 2) Get faces
+    # Get faces
     faces = get_faces_of_interest(conn)
     print(f"Found {len(faces)} faces of interest.")
 
@@ -202,7 +202,7 @@ def main(do_simplify=False, simplify_tolerance=1.0):
 
             # Decide how to compute anchors
             if (ROAD_MIN <= fclass < ROAD_MAX) or (WATER_MIN <= fclass < WATER_MAX):
-                # roads/water => skeleton approach
+                # roads/water
                 anchors = compute_skeleton_anchors(
                     polygon=poly_shp,
                     do_simplify=do_simplify,
@@ -212,7 +212,7 @@ def main(do_simplify=False, simplify_tolerance=1.0):
                     c = poly_shp.centroid
                     anchors = [(c, 0.0)]
             elif BULD_MIN <= fclass < BULD_MAX:
-                # building => polylabel approach
+                # building
                 anchors = compute_building_anchor(
                     polygon=poly_shp
                 )
