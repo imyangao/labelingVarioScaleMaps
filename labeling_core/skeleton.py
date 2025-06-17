@@ -34,7 +34,7 @@ def largest_inscribed_circle(polygon):
 
 
 # ----------------------------------------------------------------------
-# Step A: Build the raw skeleton for a polygon
+# Build the raw skeleton for a polygon
 # ----------------------------------------------------------------------
 def extract_boundary_segments(polygon):
     """Extracts boundary segments from a Polygon or MultiPolygon."""
@@ -43,7 +43,7 @@ def extract_boundary_segments(polygon):
     if polygon.geom_type == "Polygon":
         boundaries = [polygon.exterior] + list(polygon.interiors)
     elif polygon.geom_type == "MultiPolygon":
-        # Collect exteriors + interiors from each sub-polygon
+        # Collect exteriors + interiors
         boundaries = [p.exterior for p in polygon.geoms] + [i for p in polygon.geoms for i in p.interiors]
     else:
         return None
@@ -72,7 +72,7 @@ def build_skeleton_lines(polygon):
     return skeletons
 
 # ----------------------------------------------------------------------
-# Step B: Convert skeleton lines to a graph
+# Convert skeleton lines to a graph
 # ----------------------------------------------------------------------
 def lines_to_graph(lines):
     """
@@ -91,7 +91,7 @@ def lines_to_graph(lines):
     return G
 
 # ----------------------------------------------------------------------
-# Step C: Identify high-degree junctions
+# Identify high-degree junctions
 # ----------------------------------------------------------------------
 def get_junction_nodes(G, min_degree=3):
     """
@@ -100,13 +100,13 @@ def get_junction_nodes(G, min_degree=3):
     return {n for n, deg in G.degree() if deg >= min_degree}
 
 # ----------------------------------------------------------------------
-# Step D: Find paths connecting the high-degree junctions (removing leaves)
+# Find paths connecting the high-degree junctions (removing leaves)
 # ----------------------------------------------------------------------
 def find_junction_to_junction_paths(G, junctions):
     """
     For every pair of junctions (in the same connected component),
     find a simple path that does not pass through any *other* junction.
-    This yields direct connections between major junctions.
+    This finds direct connections between major junctions.
     """
     # Map each node to its connected component
     connected_comps = list(nx.connected_components(G))
@@ -133,7 +133,6 @@ def find_junction_to_junction_paths(G, junctions):
 
 def find_path_excluding_junctions(G, start, goal, junction_set):
     """
-    Simple BFS from start to goal, forbidding visits to any *other* junction.
     If we encounter a junction in mid-path (not the goal), skip that route.
     Returns a list of coordinates forming the path, or None if none found.
     """
@@ -156,10 +155,9 @@ def find_path_excluding_junctions(G, start, goal, junction_set):
     return None
 
 # ----------------------------------------------------------------------
-# Step E: Merge lines that are nearly collinear
+# Merge lines that are nearly collinear
 # ----------------------------------------------------------------------
 def angle_between_vectors(v1, v2):
-    """Acute angle between two 2D vectors in radians."""
     dot = v1[0] * v2[0] + v1[1] * v2[1]
     mag1 = sqrt(v1[0]**2 + v1[1]**2)
     mag2 = sqrt(v2[0]**2 + v2[1]**2)
@@ -273,7 +271,7 @@ def merge_collinear_lines(lines, angle_threshold=5.0):
 
 
 # ----------------------------------------------------------------------
-# Step F: Putting it all together in generate_skeleton_for_gpkg
+# Putting it all together in generate_skeleton_for_gpkg
 # ----------------------------------------------------------------------
 def generate_skeleton_for_gpkg(
         input_gpkg,
@@ -299,7 +297,6 @@ def generate_skeleton_for_gpkg(
         print(f"Processing layer: {layer}")
         gdf = gpd.read_file(input_gpkg, layer=layer)
 
-        # Keep only valid polygons and explode MultiPolygons
         gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
         gdf = gdf[gdf.geometry.is_valid]
         gdf = gdf.explode(index_parts=True)
@@ -363,11 +360,10 @@ def generate_skeleton_for_gpkg(
                         if ln.length > 0:
                             layer_roads_mainskel.append({"geometry": ln, "poly_id": idx})
 
-                    # LABELING: Take all lines above a fraction of the max length
                     sorted_lines = sorted(primary_paths, key=lambda l: l.length, reverse=True)
                     if len(sorted_lines) > 0:
                         max_length = sorted_lines[0].length
-                        threshold_fraction = 0.50  # label lines >= 25% of the longest line
+                        threshold_fraction = 0.50
                         length_threshold = threshold_fraction * max_length
                     else:
                         length_threshold = 0.0
@@ -428,7 +424,6 @@ def generate_skeleton_for_gpkg(
                         if ln.length > 0:
                             layer_water_mainskel.append({"geometry": ln, "poly_id": idx})
 
-                    # LABELING: multiple lines above length threshold
                     sorted_lines = sorted(primary_paths, key=lambda l: l.length, reverse=True)
                     if len(sorted_lines) > 0:
                         max_length = sorted_lines[0].length
