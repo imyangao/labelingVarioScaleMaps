@@ -9,9 +9,6 @@ from .skeleton import (
 )
 
 def compute_line_angle(line):
-    """
-    Return the bearing of a LineString constrained to -90…90°.
-    """
     coords = list(line.coords)
     if len(coords) < 2:
         return 0.0
@@ -27,7 +24,6 @@ def compute_line_angle(line):
 def compute_skeleton_anchors(polygon, do_simplify=False, simplify_tolerance=1.0, threshold_fraction=0.5):
     """
     Computes label anchors for a polygon using its skeleton.
-    This is suitable for linear features like roads and rivers.
     """
     if do_simplify and simplify_tolerance > 0:
         polygon = polygon.simplify(simplify_tolerance, preserve_topology=True)
@@ -41,11 +37,9 @@ def compute_skeleton_anchors(polygon, do_simplify=False, simplify_tolerance=1.0,
     
     candidate_lines = []
     if len(junctions) < 2:
-        # Fallback: not enough junctions, use the longest raw skeleton lines
-        # candidate_lines = sorted(raw_skel_lines, key=lambda ln: ln.length, reverse=True)
+        # Not enough junctions - no very important segment
         return []
     else:
-        # Real skeleton lines - using primary paths directly
         primary_paths = find_junction_to_junction_paths(G, junctions)
         if not primary_paths:
             return []
