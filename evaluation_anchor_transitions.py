@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 from urllib.parse import quote_plus
 from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
 tqdm.pandas()
 
 # ---------- Connect ------------------------------------------------
@@ -114,19 +115,31 @@ jumps = (
 )
 
 big = jumps[(jumps.method=="label_anchors") & (jumps.jump > 1)]   # >1 m
-print(big.sort_values("jump", ascending=False).head())
+print(big.sort_values("jump", ascending=False).head(20))
+
+threshold = 0.030
+
+# Filter for method 'label_anchors' and jump > 0.030
+large_jumps = jumps[(jumps["method"] == "label_anchors") & (jumps["jump"] > threshold)]
+
+# Count them
+num_large_jumps = len(large_jumps)
+print(f"Number of jumps > {threshold} units in 'label_anchors': {num_large_jumps}")
 
 # ---------- Aggregate statistics -----------------------------------
 stats_per_method = (
     jumps.groupby("method")["jump"]
          .agg(mean="mean",
-              median="median",
+              # median="median",
               p99=lambda s: np.percentile(s, 99),
+              p95=lambda s: np.percentile(s, 95),
+              p90=lambda s: np.percentile(s, 90),
               maximum="max",
-              std="std",
+              # std="std",
               n_samples="size")
          .reset_index()
 )
 
 print("\n=== Smoothness statistics per method (units of CRS) ===")
 print(stats_per_method.to_markdown(index=False, floatfmt=".3f"))
+
