@@ -13,18 +13,16 @@ def assign_label_trace_ids(conn, table_name, distance_per_step=float('inf')):
     Parameters:
     - conn: Active database connection.
     - table_name: The name of the label anchors table to process.
-    - distance_per_step: How many map units are allowed per step in time.
+    - distance_per_step: How many map units are allowed per step in time (!Still in test, but set by default = float('inf') is fine)
     """
-    # 1. Add column if not exists
+    # Add column if not exists
     with conn.cursor() as cur:
         try:
-            # Use ASNI SQL standard for adding column if not exists
             cur.execute(f"""
                 ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS label_trace_id BIGSERIAL;
             """)
         except psycopg2.errors.DuplicateColumn:
             conn.rollback()
-            # Try to add BIGSERIAL if previous command fails
             try:
                 cur.execute(f"ALTER TABLE {table_name} ADD COLUMN label_trace_id BIGSERIAL;")
             except psycopg2.errors.DuplicateColumn:
@@ -33,7 +31,7 @@ def assign_label_trace_ids(conn, table_name, distance_per_step=float('inf')):
             print(f"Could not add label_trace_id column to {table_name}: {e}")
             conn.rollback()
 
-    # 2. Fetch all anchors
+    # Fetch all anchors
     with conn.cursor() as cur:
         cur.execute(f"""
             SELECT label_id, face_id, step_value,
@@ -44,7 +42,7 @@ def assign_label_trace_ids(conn, table_name, distance_per_step=float('inf')):
         """)
         rows = cur.fetchall()
 
-    # 3. Group by face_id
+    # Group by face_id
     faces_map = defaultdict(list)
     for (lbl_id, face_id, step_val, x, y) in rows:
         faces_map[face_id].append((lbl_id, step_val, x, y))
@@ -98,7 +96,7 @@ def assign_label_trace_ids(conn, table_name, distance_per_step=float('inf')):
                 active_traces = new_active
                 prev_step_val = step_val
 
-    # 4. Write results to DB
+    # Write results to DB
     with conn.cursor() as cur:
         for lbl_id, trace_id in assignments.items():
             cur.execute(f"""
