@@ -137,19 +137,25 @@ class ScaleStep(object):
 
 def _test():
     dataset = "yan"
-    base_denominator = 10000
-    mapping = ScaleStep(base_denominator, dataset)
+    # base_denominator = 10000
+    # mapping = ScaleStep(base_denominator, dataset)
+    #
+    # # New function call
+    # print("\nSteps for scales doubling from base:")
+    # current_denominator = base_denominator
+    # max_iterations = 10  # Prevent infinite loops
+    # for _ in range(max_iterations):
+    #     step = mapping.step_for_scale(current_denominator)
+    #     print(f"Scale 1:{current_denominator} → Step: {step:.0f}")
+    #     current_denominator *= 2  # Double the denominator
+    #
+    # print((mapping.scale_for_step(0)))
 
-    # New function call
-    print("\nSteps for scales doubling from base:")
-    current_denominator = base_denominator
-    max_iterations = 10  # Prevent infinite loops
-    for _ in range(max_iterations):
-        step = mapping.step_for_scale(current_denominator)
-        print(f"Scale 1:{current_denominator} → Step: {step:.0f}")
-        current_denominator *= 2  # Double the denominator
-
-    print((mapping.scale_for_step(0)))
+    mapping = ScaleStep(10000, dataset)
+    scale = mapping.scale_for_step(12049)
+    mpp = mapping.resolution_mpp(scale, ppi=96)
+    screen_distance_pixels = 216.715 / mpp
+    print(f"Screen distance: {screen_distance_pixels:.2f} px")
 
 if __name__ == "__main__":
     _test()
