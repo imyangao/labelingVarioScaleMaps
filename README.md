@@ -1,6 +1,6 @@
 # Labeling Vario-Scale Maps
 
-This repository provides necessary components for generating, processing, and evaluating label anchors for vario-scale maps. It includes the computation of label anchor points for geometries, label trace IDs for label trajectories, evaluation metrics, and export JSON files for visualization labels on the web.
+This repository provides necessary components for generating, processing, and evaluating label anchors for vario-scale maps. It includes the computation of label anchor points for geometries, label trace IDs for label line trajectories, evaluation metrics, and export JSON files for visualization labels on the web.
 
 ## Overview
 
