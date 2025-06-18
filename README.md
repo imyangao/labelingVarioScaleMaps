@@ -24,7 +24,7 @@ Handles PostgreSQL/PostGIS database connection setup. Also defines constants for
 
 Core utility functions for:
 - Extracting polygon boundary segments.
-- Generating skeleton lines using the Grassfire algorithm(https://github.com/bmmeijers/grassfire).
+- Generating skeleton lines using the [Grassfire algorithm](https://github.com/bmmeijers/grassfire) by [Martijn Meijers](https://github.com/bmmeijers).
 - Building graphs from skeleton lines.
 - Finding main paths between important junctions.
 - Processing all layers in a GeoPackage to produce skeletons, label anchors, and outputs(optional).
