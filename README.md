@@ -16,11 +16,11 @@ Computes label anchor points and rotation angles for a given geometry:
 - For roads/water: uses skeleton lines and midpoints of longest segments.
 - For buildings: uses centroid or polylabel plus orientation of the longest edge of the minimum bounding rectangle.
 
-### `db.py`
+### `labeling_core/db.py`
 
 Handles PostgreSQL/PostGIS database connection setup. Also defines constants for identifying feature types (road, water, buildings) based on `feature_class` codes.
 
-### `skeleton.py`
+### `labeling_core/skeleton.py`
 
 Core utility functions for:
 - Extracting polygon boundary segments.
@@ -29,7 +29,7 @@ Core utility functions for:
 - Finding main paths between important junctions.
 - Processing all layers in a GeoPackage to produce skeletons, label anchors, and outputs(optional).
 
-### `traces.py`
+### `labeling_core/traces.py`
 
 Links anchors across multiple steps into **label_trace_IDs** using spatial proximity.
 
