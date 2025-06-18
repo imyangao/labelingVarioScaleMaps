@@ -59,7 +59,7 @@ Performs simple statistics:
 Evaluates label trace smoothness across steps:
 - Interpolates anchor points and angles between steps.
 - Computes jump distances between consecutive steps.
-- Outputs statistics (mean, p95, p99) of jump distances per method (event-based vs slice-based).
+- Outputs statistics (mean, p99, maximum) of jump distances per method (event-based vs slice-based).
 
 ### `labels2JSON.py`
 
